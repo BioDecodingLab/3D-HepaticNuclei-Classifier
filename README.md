@@ -32,32 +32,59 @@ This codebase accompanies the work:
 📁 Repository Structure
 
 3D-HepaticNuclei-Classifier/
+
 │
+
 ├── data/
+
 │   ├── raw/                 # Microscopy raw data (not included)
+
 │   ├── processed/           # Bounding boxes, normalized crops
+
 │   └── embeddings/          # 3DINO embeddings (.npy)
+
 │
+
 ├── src/
+
 │   ├── preprocessing/       # Bounding-box extraction & 3D preprocessing
+
 │   ├── dino/                # 3DINO feature extraction scripts
+
 │   ├── models/              # RF, SVM, MLP models
+
 │   ├── utils/               # Helpers, metrics, visualization
+
 │   └── training/            # Training & evaluation loops
+
 │
+
 ├── notebooks/
+
 │   ├── 1_preprocessing.ipynb
+
 │   ├── 2_embedding_extraction.ipynb
+
 │   ├── 3_training_classifiers.ipynb
+
 │   └── 4_evaluation.ipynb
+
 │
+
 ├── results/
+
 │   ├── metrics/             # F1, confusion matrices
+
 │   └── figures/             # Visualizations for publication
+
 │
+
 ├── environment.yml          # Pixi / Conda environment file
+
 ├── requirements.txt         # Alternative Python dependency list
+
 ├── LICENSE
+
 └── README.md
 
 
