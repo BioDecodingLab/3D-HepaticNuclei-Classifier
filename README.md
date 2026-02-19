@@ -1,7 +1,7 @@
 # 3D-HepaticNuclei-Classifier
 A lightweight and reproducible pipeline for 3D nucleus classification in hepatic tissue using 3D self-supervised embeddings (3DINO) and supervised machine learning.
 
-📌 Overview
+## 📌 Overview
 
 This repository contains the implementation of a 3D nucleus classification pipeline built on:
 
@@ -16,7 +16,7 @@ This codebase accompanies the work:
 “Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3D DINO Embeddings” (2026).
 
 
-✨ Key Features
+## ✨ Key Features
 
 ✔ 3D nucleus preprocessing (bounding boxes, normalization)
 ✔ Self-supervised 3DINO embedding extraction
@@ -29,7 +29,7 @@ This codebase accompanies the work:
 
 
 
-📁 Repository Structure
+## 📁 Repository Structure
 
 3D-HepaticNuclei-Classifier/
 
@@ -89,21 +89,21 @@ This codebase accompanies the work:
 
 
 
-🧬 Dataset (Link to Zenodo dataset)
+## 🧬 Dataset (Link to Zenodo dataset)
 
 This project uses 3D confocal microscopy volumes of mouse liver tissue, provided by: Universidad de Concepción, Chile
 
 Each nucleus is segmented via bounding boxes and annotated into classes such as:
 
--Hepatocyte
--Kupffer cell
--Stellate cell
--Endothelial cell
--Other cell
+1. Hepatocyte
+2. Kupffer cell
+3. Stellate cell
+4. Endothelial cell
+5. Other cell
 
 
 
-🚀 Getting Started
+## 🚀 Getting Started
 1. Install environment
 
 conda env create -f environment.yml
@@ -122,14 +122,14 @@ conda activate hepatic-nuclei
 6. Reaconstruct whole image
 
 
-📊 Results (example)
+## 📊 Results (example)
 Classifier	Accuracy	F1 (macro)	Notes
 Random Forest	0.92	0.89	Fast, robust
 SVM	0.88	0.86	Sensitive to scaling
 MLP	0.94	0.91	Best overall
 
 
-📝 Citation
+## 📝 Citation
 
 If you use this code, please cite:
 
