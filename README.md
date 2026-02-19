@@ -6,11 +6,8 @@ A lightweight and reproducible pipeline for 3D nucleus classification in hepatic
 This repository contains the implementation of a 3D nucleus classification pipeline built on:
 
 3DINO self-supervised representations
-
 Bounding-box extraction of nuclear instances
-
 Supervised classifiers (Random Forest, SVM, MLP)
-
 3D microscopy datasets of mouse liver tissue
 
 The goal is to provide an efficient, scalable, and reproducible workflow for the automatic classification of hepatic nuclear morphotypes from volumetric images.
@@ -18,25 +15,23 @@ The goal is to provide an efficient, scalable, and reproducible workflow for the
 This codebase accompanies the work:
 “Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3D DINO Embeddings” (2026).
 
+
 ✨ Key Features
 
 ✔ 3D nucleus preprocessing (bounding boxes, normalization)
-
 ✔ Self-supervised 3DINO embedding extraction
-
 ✔ Multiple classifier options (RF, SVM, MLP)
-
 ✔ Evaluation metrics: accuracy, precision, recall, F1-score
-
 ✔ Configurable training pipeline
-
 ✔ Reproducible experiments using fixed seeds
-
 ✔ Lightweight and easy to extend for new tissues or modalities
+
+
+
 
 📁 Repository Structure
 
-3DINO-HepaticNuclei-Classifier/
+3D-HepaticNuclei-Classifier/
 │
 ├── data/
 │   ├── raw/                 # Microscopy raw data (not included)
@@ -66,12 +61,10 @@ This codebase accompanies the work:
 └── README.md
 
 
+
 🧬 Dataset (Link to Zenodo dataset)
 
-This project uses 3D confocal microscopy volumes of mouse liver tissue, provided by:
-
-Universidad de Concepción, Chile
-
+This project uses 3D confocal microscopy volumes of mouse liver tissue, provided by: Universidad de Concepción, Chile
 
 Each nucleus is segmented via bounding boxes and annotated into classes such as:
 
@@ -80,6 +73,8 @@ Each nucleus is segmented via bounding boxes and annotated into classes such as:
 -Stellate cell
 -Endothelial cell
 -Other cell
+
+
 
 🚀 Getting Started
 1. Install environment
