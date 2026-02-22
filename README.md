@@ -50,6 +50,7 @@ This repository accompanies the thesis work:
 ## Repository Structure
 
 3D-HepaticNuclei-Classifier/
+
 ├─ 📁 data/
 
 │  ├─ 📁 raw/                # Raw microscopy volumes (not included)
