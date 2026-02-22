@@ -1,92 +1,66 @@
 # 3D-HepaticNuclei-Classifier
-A lightweight and reproducible pipeline for 3D nucleus classification in hepatic tissue using 3D self-supervised embeddings (3DINO) and supervised machine learning.
+A reproducible pipeline for 3D hepatic nucleus classification using self-supervised 3DINO embeddings and supervised machine learning.
 
-## 📌 Overview
+## Overview
 
-This repository contains the implementation of a 3D nucleus classification pipeline built on:
+This repository implements a 3D nuclear morphotype classification pipeline based on:
 
-3DINO self-supervised representations
+3DINO self-supervised feature extraction
 Bounding-box extraction of nuclear instances
 Supervised classifiers (Random Forest, SVM, MLP)
 3D microscopy datasets of mouse liver tissue
 
-The goal is to provide an efficient, scalable, and reproducible workflow for the automatic classification of hepatic nuclear morphotypes from volumetric images.
+The goal is to evaluate how well self-supervised 3D embeddings support downstream classification of hepatic nuclear morphotypes.
 
-This codebase accompanies the work:
-“Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3D DINO Embeddings” (2026).
+This repository accompanies the thesis work:
+“Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3DINO Embeddings” (2026)
 
 
-## ✨ Key Features
+## Key Features
 
 ✔ 3D nucleus preprocessing (bounding boxes, normalization)
 ✔ Self-supervised 3DINO embedding extraction
 ✔ Multiple classifier options (RF, SVM, MLP)
+✔ Hyperparameter optimization experiments
 ✔ Evaluation metrics: accuracy, precision, recall, F1-score
 ✔ Configurable training pipeline
 ✔ Reproducible experiments using fixed seeds
 ✔ Lightweight and easy to extend for new tissues or modalities
 
 
+## Current Research Notes
 
+✔ Performance limitations observed between Stellate, Kupffer and Endothelial classes.
+✔ Hyperparameter tuning of Random Forest did not significantly outperform baseline.
+✔ Potential domain shift between 3DINO pretraining data and hepatic confocal volumes.
+✔ Data augmentation strategies under review (visual verification pending).
+✔ Ongoing evaluation of excluding heterogeneous “Other” class for ablation analysis.
 
 ## 📁 Repository Structure
 
 3D-HepaticNuclei-Classifier/
-
-│
-
-├── data/
-
-│   ├── raw/                 # Microscopy raw data (not included)
-
-│   ├── processed/           # Bounding boxes, normalized crops
-
-│   └── embeddings/          # 3DINO embeddings (.npy)
-
-│
-
-├── src/
-
-│   ├── preprocessing/       # Bounding-box extraction & 3D preprocessing
-
-│   ├── dino/                # 3DINO feature extraction scripts
-
-│   ├── models/              # RF, SVM, MLP models
-
-│   ├── utils/               # Helpers, metrics, visualization
-
-│   └── training/            # Training & evaluation loops
-
-│
-
-├── notebooks/
-
-│   ├── 1_preprocessing.ipynb
-
-│   ├── 2_embedding_extraction.ipynb
-
-│   ├── 3_training_classifiers.ipynb
-
-│   └── 4_evaluation.ipynb
-
-│
-
-├── results/
-
-│   ├── metrics/             # F1, confusion matrices
-
-│   └── figures/             # Visualizations for publication
-
-│
-
-├── environment.yml          # Pixi / Conda environment file
-
-├── requirements.txt         # Alternative Python dependency list
-
-├── LICENSE
-
-└── README.md
-
+├─ 📁 data/
+│  ├─ 📁 raw/                # Raw microscopy volumes (not included)
+│  ├─ 📁 processed/          # Crops/patches from bounding boxes
+│  └─ 📁 embeddings/         # 3DINO embeddings (.npy)
+├─ 📁 src/
+│  ├─ 📁 preprocessing/      # Bounding-box extraction & 3D preprocessing
+│  ├─ 📁 dino/               # 3DINO feature extraction
+│  ├─ 📁 models/             # RF / SVM / MLP model definitions
+│  ├─ 📁 training/           # Training & evaluation scripts
+│  └─ 📁 utils/              # Metrics, plots, helpers
+├─ 📁 notebooks/
+│  ├─ 1_preprocessing.ipynb
+│  ├─ 2_embedding_extraction.ipynb
+│  ├─ 3_training_classifiers.ipynb
+│  └─ 4_evaluation.ipynb
+├─ 📁 results/
+│  ├─ 📁 metrics/            # Scores, confusion matrices
+│  └─ 📁 figures/            # Publication-ready plots
+├─ environment.yml
+├─ requirements.txt
+├─ LICENSE
+└─ README.md
 
 
 ## 🧬 Dataset (Link to Zenodo dataset)
@@ -124,9 +98,9 @@ conda activate hepatic-nuclei
 
 ## 📊 Results (example)
 Classifier	Accuracy	F1 (macro)	Notes
-Random Forest	0.92	0.89	Fast, robust
-SVM	0.88	0.86	Sensitive to scaling
-MLP	0.94	0.91	Best overall
+Random Forest	0.6739	0.5001	Fast, robust
+SVM	
+MLP	
 
 
 ## 📝 Citation
