@@ -132,8 +132,11 @@ conda activate hepatic-nuclei
 
 ## Results 
 Classifier	Accuracy	F1 (macro)	Notes
+
 Random Forest	0.6739	0.5001	Fast, robust
+
 SVM	
+
 MLP	
 
 
