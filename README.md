@@ -130,7 +130,7 @@ conda activate hepatic-nuclei
 6. Reaconstruct whole image
 
 
-## Results (example)
+## Results 
 Classifier	Accuracy	F1 (macro)	Notes
 Random Forest	0.6739	0.5001	Fast, robust
 SVM	
