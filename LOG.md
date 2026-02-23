@@ -3,6 +3,7 @@
 **Project:** 3D-HepaticNuclei-Classifier  
 **Author:** Alisson Terán  
 **Thesis:** Automatic Classifier of Cell Nuclei in 3D Images of Liver Tissue using 3DINO
+
 **Year:** 2026  
 
 ---
