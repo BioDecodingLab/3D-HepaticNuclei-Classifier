@@ -72,11 +72,10 @@ However, no significant improvement was observed compared to the baseline model.
 **Planned experiments:**
 - Run experiments without augmentation.
 - Compare performance using:
-  - 350 samples per class
   - 500 samples per class
   - 3500 samples per class
   - 7000 samples per class
-  - 7500 samples per class
+    
 - Incorporate controlled augmentation techniques:
   - Gaussian Noise
   - Gaussian Blur
