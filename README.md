@@ -5,15 +5,15 @@ A reproducible pipeline for 3D hepatic nucleus classification using self-supervi
 
 This repository implements a 3D nuclear morphotype classification pipeline based on:
 
-3DINO self-supervised feature extraction
-Bounding-box extraction of nuclear instances
-Supervised classifiers (Random Forest, SVM, MLP)
-3D microscopy datasets of mouse liver tissue
+- **Self-supervised feature extraction:** 3DINO embeddings  
+- **Nucleus instance preparation:** bounding-box (3D crop) extraction  
+- **Downstream classifiers:** Random Forest, SVM, and MLP  
+- **Data:** 3D microscopy volumes of mouse liver tissue
 
-The goal is to evaluate how well self-supervised 3D embeddings support downstream classification of hepatic nuclear morphotypes.
+The goal is to evaluate how well self-supervised **3D embeddings** support downstream classification of **hepatic nuclear morphotypes**.
 
-This repository accompanies the thesis work:
-“Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3DINO Embeddings” (2026)
+This repository accompanies the thesis work:  
+**“Automated Classification of Hepatic 3D Nuclear Morphotypes Using Self-Supervised 3DINO Embeddings” (2026)**.
 
 
 ## Key Features
