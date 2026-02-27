@@ -51,7 +51,7 @@ This repository accompanies the thesis work:
 
 The notebooks are numbered and must be executed in order:
 
-Notebook 1 — Data preprocessing
+**Notebook 1 — Data preprocessing**
 
 Loads the raw 3D volumes
 
@@ -59,7 +59,7 @@ Applies the required preprocessing (e.g., normalization + crop/pad to the target
 
 Saves the processed dataset ready for embedding extraction
 
-Notebook 2 — Embedding extraction (3DINO / ViT features)
+**Notebook 2 — Embedding extraction (3DINO / ViT features)**
 
 Loads the preprocessed volumes from Notebook 1
 
@@ -67,7 +67,7 @@ Albumentations and Extracts embeddings
 
 Saves embeddings
 
-Notebook 3 — Random Forest classifier
+**Notebook 3 — Random Forest classifier**
 
 Loads the embeddings from Notebook 2
 
