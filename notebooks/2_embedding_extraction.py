@@ -17,8 +17,11 @@ drive.mount('/content/drive')
 import os, glob, random
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import tifffile
+import tifffile as tiff
+import matplotlib.pyplot as plt
+import skimage
 
 # Configuración de reproducibilidad
 SEED = 42
@@ -38,11 +41,15 @@ TRAIN_DIR = "/content/drive/MyDrive/tesis/patches_train"
 TEST_DIR  = "/content/drive/MyDrive/tesis/patches_test"
 
 LABELS = [1,2,3,4,5]
-TARGET_DHW0 = (80,80,80)  #Tamaño inicial del recorte (profundidad, alto, ancho)
 TARGET_DHW  = (112,112,112) # Tamaño final de entrada al modelo
 
 BATCH_SIZE = 8
 NUM_WORKERS = 2
+TARGET_PER_LABEL = 3500
+
+#Revision de augmentaciones
+AUG_VIZ_DIR = "/content/drive/MyDrive/tesis/aug_viz_examples_crop_3500_solocrop_2"
+os.makedirs(AUG_VIZ_DIR, exist_ok=True)
 
 # Normaliza un volumen 3D a rango [-1, 1] usando cuantiles para reducir el efecto de outliers
 def normalize_to_minus1_1(vol, p_low=0.0005, p_high=0.9995):
@@ -96,18 +103,66 @@ def intensity_aug(vol, rng: np.random.RandomState):
         vol = np.clip(vol + rng.normal(0, 0.03, size=vol.shape).astype(np.float32), -1, 1)
     return vol
 
-def augment_one(vol, rng: np.random.RandomState):
-    vol = random_flip_rot(vol, rng)
-    vol = intensity_aug(vol, rng)
+def gaussian_noise(vol, rng: np.random.RandomState, p=0.5, sigma=0.03):
+    if rng.rand() < p:
+        vol = np.clip(vol + rng.normal(0, sigma, size=vol.shape).astype(np.float32), -1, 1)
     return vol
 
-#aumentar el gaussion blur y noise, visualizar las aumentaciones de imagenes, verificar en fiji, hacer los embeddings sin aumetnar datos, 500, 3500 y 7000 , solo en el random forest primero
+def _gaussian_1d_kernel(sigma: float, radius: int):
+    x = torch.arange(-radius, radius+1, dtype=torch.float32)
+    k = torch.exp(-(x**2) / (2*sigma*sigma))
+    k = k / (k.sum() + 1e-8)
+    return k
+
+def gaussian_blur_3d(vol, rng: np.random.RandomState, p=0.5, sigma_range=(0.4, 1.2)):
+    """
+    Blur 3D usando conv3d separable en PyTorch.
+    Entrada: vol numpy (D,H,W) float32 [-1,1]
+    Salida: vol numpy (D,H,W) float32 [-1,1]
+    """
+    if rng.rand() >= p:
+        return vol
+
+    sigma = float(rng.uniform(sigma_range[0], sigma_range[1]))
+    radius = int(max(1, round(3*sigma)))
+    k1 = _gaussian_1d_kernel(sigma, radius)  # (K,)
+
+    # Convertir a tensor (1,1,D,H,W)
+    x = torch.from_numpy(vol).unsqueeze(0).unsqueeze(0)  # CPU
+    x = x.to(torch.float32)
+
+    # kernels separables: aplicar en W, luego H, luego D
+    # conv3d  (out_ch,in_ch,kD,kH,kW)
+    kW = k1.view(1,1,1,1,-1)
+    kH = k1.view(1,1,1,-1,1)
+    kD = k1.view(1,1,-1,1,1)
+
+    x = F.conv3d(x, kW, padding=(0,0,radius))
+    x = F.conv3d(x, kH, padding=(0,radius,0))
+    x = F.conv3d(x, kD, padding=(radius,0,0))
+
+    out = x.squeeze(0).squeeze(0).numpy()
+    out = np.clip(out, -1, 1)
+    return out.astype(np.float32)
+
+def augment_one(vol, rng: np.random.RandomState):
+    # geom
+    vol = random_flip_rot(vol, rng)
+
+    # fotométrico
+    vol = intensity_aug(vol, rng)
+
+    # blur + noise
+    vol = gaussian_blur_3d(vol, rng, p=0.5, sigma_range=(0.4, 1.2))
+    vol = gaussian_noise(vol, rng, p=0.5, sigma=0.03)
+
+    return vol
+
 
 # Dataset para cargar volúmenes 3D en formato TIFF organizados por carpetas label_X
 class Tif3DDatasetSingle(Dataset):
-    def __init__(self, base_dir, labels, target_dhw0, target_dhw, do_aug=False, seed=SEED):
+    def __init__(self, base_dir, labels,  target_dhw, do_aug=False, seed=SEED):
         self.items = []
-        self.target_dhw0 = target_dhw0
         self.target_dhw = target_dhw
         self.do_aug = do_aug
         self.seed = seed
@@ -125,15 +180,16 @@ class Tif3DDatasetSingle(Dataset):
         vol = tifffile.imread(path).astype(np.float32)  # (Z,H,W)
 
         vol = normalize_to_minus1_1(vol)
-        vol = center_crop_or_pad_3d(vol, self.target_dhw0)
-        vol = np.resize(vol, self.target_dhw)
+ # clave: NO np.resize; solo "lienzo" 112³ sin deformar, el cambio vs el original de np.resize
+        print("original", vol.shape)
+        vol = center_crop_or_pad_3d(vol, self.target_dhw)
 
- #Aplica augmentation si está habilitado (determinístico por índice: seed + idx)
+ #Aplica augmentation 
         if self.do_aug:
             rng = np.random.RandomState(self.seed + idx)
             vol = augment_one(vol, rng)
 
-        x = torch.from_numpy(vol).unsqueeze(0)  # (1,D,H,W)
+        x = torch.from_numpy(vol).unsqueeze(0)  
         return x, int(y), path
 
 # Construye un índice balanceado por clase replicando (con reemplazo) hasta target_per_label
@@ -153,24 +209,64 @@ def build_augmented_index(items, labels, target_per_label, seed=SEED):
     rng.shuffle(new_items)
     return new_items
 
-# Número objetivo de muestras por clase después del balanceo (sobremuestreo con augmentation)
-TARGET_PER_LABEL = 7000
+#Definir las aumentaciones/guardado
+def save_aug_preview(dataset_noaug, dataset_aug, n_examples=10, out_dir=AUG_VIZ_DIR):
+    """
+    Guarda comparaciones (original vs aug) como PNG usando 3 cortes 2D:
+    - axial (D/2)
+    - coronal (H/2)
+    - sagittal (W/2)
+    """
+    os.makedirs(out_dir, exist_ok=True)
 
-base_train = Tif3DDatasetSingle(TRAIN_DIR, LABELS, TARGET_DHW0, TARGET_DHW, do_aug=False, seed=SEED)
-aug_items = build_augmented_index(base_train.items, LABELS, TARGET_PER_LABEL, seed=SEED)
+    picks = np.linspace(0, len(dataset_noaug)-1, num=min(n_examples, len(dataset_noaug)), dtype=int)
 
-train_aug = Tif3DDatasetSingle(TRAIN_DIR, LABELS, TARGET_DHW0, TARGET_DHW, do_aug=True, seed=SEED)
-train_aug.items = aug_items
+    for i, idx in enumerate(picks):
+        x0, y0, p0 = dataset_noaug[idx]
+        x1, y1, p1 = dataset_aug[idx]
 
-print("Train reales:", len(base_train), "| Train augmentado:", len(train_aug))
 
-# Establece el directorio actual en la ruta donde se encuentra el código fuente de 3DINO
+
+        v0 = x0.squeeze(0).numpy()  # (D,H,W)
+        v1 = x1.squeeze(0).numpy()
+
+        tiff.imwrite(os.path.join(out_dir,f"noaug_{i:02d}_label{y0}.tif"), v0)
+        tiff.imwrite(os.path.join(out_dir,f"aug_{i:02d}_label{y0}.tif"), v1)
+
+
+        D,H,W = v0.shape
+        d0, h0, w0 = D//2, H//2, W//2
+
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig.suptitle(f"Label={y0} | idx={idx}\n{os.path.basename(p0)}", fontsize=10)
+
+        # Original
+        axes[0,0].imshow(v0[d0,:,:], cmap="gray"); axes[0,0].set_title("Orig axial")
+        axes[0,1].imshow(v0[:,h0,:], cmap="gray"); axes[0,1].set_title("Orig coronal")
+        axes[0,2].imshow(v0[:,:,w0], cmap="gray"); axes[0,2].set_title("Orig sagittal")
+
+        # Aug
+        axes[1,0].imshow(v1[d0,:,:], cmap="gray"); axes[1,0].set_title("Aug axial")
+        axes[1,1].imshow(v1[:,h0,:], cmap="gray"); axes[1,1].set_title("Aug coronal")
+        axes[1,2].imshow(v1[:,:,w0], cmap="gray"); axes[1,2].set_title("Aug sagittal")
+
+        for ax in axes.ravel():
+            ax.axis("off")
+
+        out_path = os.path.join(out_dir, f"aug_preview_{i:02d}_label{y0}.png")
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=160)
+        plt.close(fig)
+
+    print(f" Guardé {len(picks)} previews en: {out_dir}")
+
 cd /content/drive/MyDrive/tesis/3DINO-main/3DINO-main
 
-# Importa funciones para cargar la configuración 3D y construir el modelo
+#importar dino
 from dinov2.eval.setup import build_model_for_eval
 from dinov2.configs import load_and_merge_config_3d
 
+#rutas de documentos
 config_file = "/content/drive/MyDrive/tesis/3DINO-main/3DINO-main/dinov2/configs/train/vit3d_highres"
 pretrained_weights = "/content/drive/MyDrive/tesis/3dino_vit_weights.pth"
 
@@ -183,7 +279,9 @@ model.eval()
 
 print("Modelo listo en:", device)
 
-# Reproducibilidad en DataLoader
+# Configuración de reproducibilidad para la etapa de extracción de embeddings.
+# Se inicializan semillas determinísticas en numpy y random por worker, y se define
+# un generador de PyTorch para controlar la aleatoriedad del DataLoader.
 def seed_worker(worker_id):
     worker_seed = SEED + worker_id
     np.random.seed(worker_seed)
@@ -192,7 +290,6 @@ def seed_worker(worker_id):
 g = torch.Generator()
 g.manual_seed(SEED)
 
-# Extracción de embeddings con 3DINO
 def extract_embeddings(dataset, save_path):
     loader = DataLoader(
         dataset,
@@ -209,9 +306,9 @@ def extract_embeddings(dataset, save_path):
     with torch.no_grad():
         for x, y, paths in loader:
             x = x.to(device, non_blocking=True)
-            out = model(x)  # (B,1024)
-            all_emb.append(out.cpu().numpy())
-            all_y.append(np.array(y))
+            out = model(x)  # (B,1024) típico
+            all_emb.append(out.detach().cpu().numpy())
+            all_y.append(np.asarray(y))
             all_paths.extend(list(paths))
 
     embeddings = np.concatenate(all_emb, axis=0)
@@ -228,14 +325,34 @@ def extract_embeddings(dataset, save_path):
     print("Embeddings:", embeddings.shape, "| Labels:", labels.shape)
     return embeddings, labels
 
-#Ruta para guardar los embeddings de train
-save_train = "/content/drive/MyDrive/tesis/embeddings_3dino_TRAIN_aug10k_seed42_finn.npz"
+# Balanceo del entrenamiento por sobremuestreo controlado:
+# se crea un índice con un número fijo de muestras por clase (TARGET_PER_LABEL) a partir de base_train.
+# Luego, sobre ese índice se aplican transformaciones de aumentación (do_aug=True) durante la lectura.
+base_train = Tif3DDatasetSingle(TRAIN_DIR, LABELS, TARGET_DHW, do_aug=False, seed=SEED)
+print("Train reales:", len(base_train))
+
+aug_items = build_augmented_index(base_train.items, LABELS, TARGET_PER_LABEL, seed=SEED)
+
+train_aug = Tif3DDatasetSingle(TRAIN_DIR, LABELS, TARGET_DHW, do_aug=True, seed=SEED)
+train_aug.items = aug_items
+
+print("Train balanceado:", len(train_aug), f"(= {len(LABELS)} * {TARGET_PER_LABEL})")
+
+#guardar
+save_aug_preview(
+    dataset_noaug=base_train,
+    dataset_aug=Tif3DDatasetSingle(TRAIN_DIR, LABELS, TARGET_DHW, do_aug=True, seed=SEED),
+    n_examples=2,
+    out_dir=AUG_VIZ_DIR
+)
+
+#ruta de salida de train
+save_train = "/content/drive/MyDrive/tesis/embeddings_3dino_TRAIN_aug3500_seed42_crop_2.npz"
 train_embeddings, train_labels = extract_embeddings(train_aug, save_train)
 
-# dataset test SIN augmentation, solo tamaños 80->112
-#Ruta para guardar los embeddings de test
-test_ds = Tif3DDatasetSingle(TEST_DIR, LABELS, TARGET_DHW0, TARGET_DHW, do_aug=False, seed=SEED)
+#ruta de salida de test
+test_ds = Tif3DDatasetSingle(TEST_DIR, LABELS, TARGET_DHW, do_aug=False, seed=SEED)
 print("Test reales:", len(test_ds))
 
-save_test = "/content/drive/MyDrive/tesis/embeddings_3dino_TEST_seed42_fin.npz"
+save_test = "/content/drive/MyDrive/tesis/embeddings_3dino_TEST_seed42_112crop_norm_crop_2.npz"
 test_embeddings, test_labels = extract_embeddings(test_ds, save_test)
