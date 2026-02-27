@@ -6,6 +6,7 @@
 **Year:** 2026  
 
 ---
+**Date:** 22/02/2026
 
 ## 1) Bounding Box Validation Issues
 
@@ -130,3 +131,37 @@ So far, results suggest that performance limitations may be more strongly influe
 Rather than by hyperparameter optimization alone.
 
 ---
+
+**Date:** 26/02/2026
+
+**Objective:** Improve pipeline robustness and strengthen statistical validity.
+
+### Embeddings v1 → v2
+
+- Removed resize-based scaling (80³ → 112³) that introduced geometric distortion.
+- Standardized input volume size to 112³ using pad/crop operations (no deformation).
+- Added Gaussian noise as an independent augmentation transform.
+- Implemented true 3D Gaussian Blur augmentation.
+- Adjusted class balancing strategy: TARGET_PER_LABEL reduced from 7000 → 3500 (5 balanced classes).
+- Added visualization and saving of augmented vs. non-augmented samples for quality control.
+- Reduced debug print statements during data loading to prevent performance slowdown.
+
+### Random Forest Training & Validation
+
+- Fixed validation leakage during hyperparameter optimization (tuning performed only on Train set).
+- Reserved hold-out validation strictly for final evaluation.
+- Implemented group-aware splitting using file paths to prevent augmentation leakage.
+- Maintained constrained hyperparameter search (n_iter=10, n_jobs=1) due to computational limitations.
+
+### Verification
+
+- Verified grouping by paths: 6958 unique paths / 17500 total samples.
+- Confirmed no path intersection between Train and Validation after split (no leakage).
+
+### General Observation
+
+- Performance limitations appear more strongly influenced by:
+  - Embedding quality
+  - Data distribution and class overlap
+  - Domain shift effects
+- Rather than by hyperparameter optimization alone.
