@@ -75,6 +75,26 @@ Trains and evaluates the Random Forest model
 
 Reports metrics (e.g., accuracy / F1 / confusion matrix) and saves the trained model if configured
 
+## Dependencies and versions
+
+This project was tested on Google Colab (GPU recommended).
+For the DINO embedding extraction notebook, install the following dependencies:
+
+##Python environment
+
+Python: Google Colab default (recommended)
+
+GPU: CUDA-enabled runtime (recommended)
+
+Packages (3DINO embeddings)
+@article{xu3dino2025,
+  title={A generalizable 3D framework and model for self-supervised learning in medical imaging},
+  author={Xu, Tony and Hosseini, Sepehr and Anderson, Chris and Rinaldi, Anthony and Krishnan, Rahul G. and Martel, Anne L. and Goubran, Maged},
+  journal={npj Digital Medicine},
+  year={2025},
+  doi={10.1038/s41746-025-02035-w},
+}
+
 ## Repository Structure
 
 3D-HepaticNuclei-Classifier/
