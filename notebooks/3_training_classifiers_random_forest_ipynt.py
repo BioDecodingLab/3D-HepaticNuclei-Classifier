@@ -39,42 +39,27 @@ def load_npz_embeddings(path):
     print("Keys encontradas:", list(data.keys()))
 
 
-    if "X" in data and "y" in data:
-        X, y = data["X"], data["y"]
-    elif "embeddings" in data and "labels" in data:
+    if "embeddings" in data and "labels" in data:
         X, y = data["embeddings"], data["labels"]
+    elif "X" in data and "y" in data:
+        X, y = data["X"], data["y"]
     else:
-        raise ValueError("No encuentro las llaves X/y o embeddings/labels.")
+        raise ValueError("No encuentro embeddings/labels o X/y.")
+
+    if "paths" not in data:
+        raise ValueError("No encuentro 'paths'. Necesario para groups.")
 
     X = np.asarray(X)
     y = np.asarray(y).reshape(-1).astype(int)
-    return X, y
+    paths = np.asarray(data["paths"]).reshape(-1).astype(str)
 
-# Carga embeddings y etiquetas del conjunto de entrenamiento
-X_train_full, y_train_full = load_npz_embeddings(TRAIN_EMB_PATH)
-# Carga embeddings y etiquetas del conjunto de prueba
-X_test, y_test = load_npz_embeddings(TEST_EMB_PATH)
+    return X, y, paths
 
-print("\nResumen:")
-print("Train:", X_train_full.shape, np.unique(y_train_full, return_counts=True))
-print("Test :", X_test.shape, np.unique(y_test, return_counts=True))
-
-# Divide el conjunto de entrenamiento en Train y Validation
-# - test_size define el porcentaje que se reserva para validación
-# - stratify mantiene la misma proporción de clases en ambos conjuntos
-# - random_state fija la aleatoriedad para que el split sea reproducible
-X_train, X_val, y_train, y_val = train_test_split(
-    X_train_full,
-    y_train_full,
-    test_size=VAL_SIZE,
-    random_state=RANDOM_STATE,
-    stratify=y_train_full
-)
-
-print("Train:", X_train.shape)
-print("Val  :", X_val.shape)
-
-# Evalúa un modelo de clasificación y muestra métricas + reportes + matrices de confusión
+# Evaluación estandarizada del clasificador:
+# - Predice etiquetas y calcula Accuracy.
+# - Calcula Precision/Recall/F1 en promedio macro (peso igual por clase) y weighted (ponderado por soporte).
+# - Imprime classification_report por clase para identificar qué categorías fallan.
+# - Grafica matriz de confusión absoluta y normalizada (por fila) para interpretar patrones de error.
 def evaluate_model(model, X, y, title=""):
     y_pred = model.predict(X)
 
@@ -93,23 +78,110 @@ def evaluate_model(model, X, y, title=""):
     print("\nClassification report:")
     print(classification_report(y, y_pred, digits=6, zero_division=0))
 
-    # Matriz de confusión (conteos)
     cm = confusion_matrix(y, y_pred)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-    disp.plot(values_format="d")
+    ConfusionMatrixDisplay(confusion_matrix=cm).plot(values_format="d")
     plt.title(f"Confusion Matrix – {title}")
     plt.show()
 
-    # Matriz de confusión normalizada
     cmn = confusion_matrix(y, y_pred, normalize="true")
-    disp2 = ConfusionMatrixDisplay(confusion_matrix=cmn)
-    disp2.plot(values_format=".2f")
+    ConfusionMatrixDisplay(confusion_matrix=cmn).plot(values_format=".2f")
     plt.title(f"Confusion Matrix Normalizada – {title}")
     plt.show()
 
     return y_pred
 
-# Modelo baseline: Random Forest
+
+# Hold-out estratificado por grupos (Group-aware stratified split):
+# - Cada "group" representa el identificador del volumen/origen (p.ej., path del archivo).
+# - Se asigna una etiqueta por grupo usando mayoría (group_labels).
+# - Se hace train_test_split sobre grupos (no sobre muestras) con estratificación por group_labels.
+# Resultado: todas las augmentaciones del mismo archivo quedan en el mismo split, evitando leakage.
+def group_stratified_holdout_split(y, groups, val_size=0.10, seed=42):
+    """
+    Split Train/Val sin fuga por augment:
+    - split por grupos (paths)
+    - estratificado por clase a nivel de grupo
+    """
+    unique_groups, inv = np.unique(groups, return_inverse=True)
+
+    # etiqueta por grupo (mayoría)
+    group_labels = np.zeros(len(unique_groups), dtype=int)
+    for gi in range(len(unique_groups)):
+        ys = y[inv == gi]
+        vals, counts = np.unique(ys, return_counts=True)
+        group_labels[gi] = vals[np.argmax(counts)]
+
+    g_train, g_val = train_test_split(
+        unique_groups,
+        test_size=val_size,
+        random_state=seed,
+        stratify=group_labels
+    )
+
+    g_train = set(g_train.tolist())
+    g_val = set(g_val.tolist())
+
+    idx = np.arange(len(y))
+    idx_train = idx[np.isin(groups, list(g_train))]
+    idx_val   = idx[np.isin(groups, list(g_val))]
+
+    return idx_train, idx_val
+
+
+# Diagnóstico de consistencia del dataset de embeddings:
+# - Se cargan embeddings y etiquetas de TRAIN y TEST desde archivos .npz
+# - Se imprime la distribución de clases para verificar desbalance
+# - Se comprueba si 'paths_full' contiene repetidos:
+#   * Si hay repetidos, significa que varias muestras provienen del mismo origen (augmentations) y se pueden agrupar.
+#   * Si todos son únicos, el path no está agrupando (posible error al definir el ID base del archivo).
+X_full, y_full, paths_full = load_npz_embeddings(TRAIN_EMB_PATH)
+X_test, y_test, _ = load_npz_embeddings(TEST_EMB_PATH)
+
+print("\nResumen:")
+print("Train Full:", X_full.shape, np.unique(y_full, return_counts=True))
+print("Test      :", X_test.shape, np.unique(y_test, return_counts=True))
+
+n_unique = len(np.unique(paths_full))
+print(f"\nPaths TRAIN únicos: {n_unique} / {len(paths_full)}")
+if n_unique == len(paths_full):
+    print(" Todos los paths son únicos. Si esperabas augmentations por path, tu path NO está agrupando.")
+else:
+    print("Hay paths repetidos -> sí agrupa augmentations (bien).")
+
+# Partición hold-out para validación:
+# - Se divide a nivel de grupo (paths) para que muestras del mismo origen no queden en Train y Val a la vez.
+# - Se mantiene estratificación aproximada por clase (a nivel de grupo).
+# - Se crean subconjuntos Train/Val y se imprime la distribución de clases para comprobar balance.
+idx_train, idx_val = group_stratified_holdout_split(
+    y=y_full,
+    groups=paths_full,
+    val_size=VAL_SIZE,
+    seed=RANDOM_STATE
+)
+
+X_train, y_train = X_full[idx_train], y_full[idx_train]
+X_val, y_val     = X_full[idx_val],   y_full[idx_val]
+paths_train      = paths_full[idx_train]
+
+print("\nConteos por clase:")
+print("Train:", np.unique(y_train, return_counts=True))
+print("Val  :", np.unique(y_val, return_counts=True))
+
+# Verificar que no hay fuga por grupos entre Train y Val
+paths_val = paths_full[idx_val]
+
+overlap = np.intersect1d(np.unique(paths_train), np.unique(paths_val))
+print("Paths en común (Train ∩ Val):", len(overlap))
+
+if len(overlap) == 0:
+    print(" Perfecto: NO hay fuga por augment (grupos separados).")
+else:
+    print(" Hay fuga: existen paths compartidos. Ejemplos:", overlap[:10])
+
+# Entrenamiento y evaluación del baseline:
+# Se define un Random Forest con configuración fija (baseline) para tener un punto de referencia
+# antes de la optimización. Se usan pesos balanceados por submuestra para mitigar desbalance,
+# y se reportan métricas en el conjunto de validación mediante evaluate_model().
 rf_base = RandomForestClassifier(
     n_estimators=800,
     random_state=RANDOM_STATE,
@@ -117,17 +189,12 @@ rf_base = RandomForestClassifier(
     class_weight="balanced_subsample"
 )
 
-# Entrena el modelo con el conjunto de entrenamiento
 rf_base.fit(X_train, y_train)
-
 _ = evaluate_model(rf_base, X_val, y_val, "VALIDACIÓN (RF base)")
-_ = evaluate_model(rf_base, X_test, y_test, "TEST (RF base)")
 
-from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
-from sklearn.ensemble import RandomForestClassifier
 
 # Espacio de búsqueda de hiperparámetros para Random Forest
-param_dist_ultra = {
+param_dist = {
     "n_estimators": [150, 250, 350, 450],
     "max_depth": [20, 30, 40, None],
     "min_samples_split": [2, 5, 10],
@@ -137,41 +204,54 @@ param_dist_ultra = {
     "class_weight": ["balanced_subsample"]
 }
 
-# Validación cruzada estratificada:
-# Mantiene proporciones de clases en cada fold y mezcla el orden para mayor robustez
-cv_ultra = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+try:
+    from sklearn.model_selection import StratifiedGroupKFold
+    cv = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+    print(" Usando StratifiedGroupKFold (ideal).")
+except Exception:
+    from sklearn.model_selection import GroupKFold
+    cv = GroupKFold(n_splits=3)
+    print(" No hay StratifiedGroupKFold, usando GroupKFold (sin estratificar).")
 
-# Búsqueda aleatoria de hiperparámetros:
-# Prueba n_iter combinaciones aleatorias dentro del espacio definido y elige la mejor según f1_macro
-search = RandomizedSearchCV(
 search = RandomizedSearchCV(
     estimator=RandomForestClassifier(
         random_state=RANDOM_STATE,
         n_jobs=-1,
         max_samples=0.7
     ),
-    param_distributions=param_dist_ultra,
-    n_iter=10,            # 10 candidatos -> 10*3 = 30 fits
+    param_distributions=param_dist,
+    n_iter=10,          # NO subo n_iter
     scoring="f1_macro",
-    cv=cv_ultra,
+    cv=cv,
     random_state=RANDOM_STATE,
-    n_jobs=1,
-    verbose=2
+    n_jobs=1,           # clave para no explotar
+    verbose=2,
+    refit=True
 )
 
-search.fit(X_train_full, y_train_full)
+# CLAVE: fit SOLO con X_train y groups=paths_train
+search.fit(X_train, y_train, groups=paths_train)
 
 print("\nBest params:", search.best_params_)
 print("Best CV f1_macro:", search.best_score_)
 
-# Obtiene el mejor modelo encontrado por RandomizedSearchCV
 best_rf = search.best_estimator_
-
-# Entrena el modelo optimizado solo con X_train para comparar de forma justa contra el baseline
-best_rf.fit(X_train, y_train)
-# Evalúa en el conjunto de validación (sirve para comparar configuraciones sin tocar el test)
 _ = evaluate_model(best_rf, X_val, y_val, "VALIDACIÓN (RF optimizado)")
 
-# Entrenamiento final para reporte
-best_rf.fit(X_train_full, y_train_full)
-_ = evaluate_model(best_rf, X_test, y_test, "TEST (RF optimizado, entrenado con todo TRAIN)")
+# Evaluación final sin sesgo:
+# Tras seleccionar hiperparámetros en el proceso de tuning (sobre Train/Val), se construye el modelo definitivo
+# con search.best_params_. Luego se reentrena usando todo el TRAIN disponible para maximizar el uso de datos,
+# y se reporta el desempeño general en el conjunto de prueba independiente (TEST).
+final_rf = RandomForestClassifier(
+    **search.best_params_,
+    random_state=RANDOM_STATE,
+    n_jobs=-1,
+    max_samples=0.7
+)
+
+final_rf.fit(X_full, y_full)
+_ = evaluate_model(final_rf, X_test, y_test, "TEST (RF optimizado, entrenado con todo TRAIN)")
+
+
+
+
