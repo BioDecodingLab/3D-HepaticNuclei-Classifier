@@ -146,37 +146,36 @@ for test_id in [1,2,3,4,5]:
     dataset_train, dataset_test = create_datasets(test_id, input_dir)
     print(f"Test image: {test_id}")
 
-  out_folder_train = os.path.join(out_dir, f"trains_{test_id}")
-  os.makedirs(out_folder_train, exist_ok=True)
-  out_folder_test = os.path.join(out_dir, f"tests_{test_id}")
-  os.makedirs(out_folder_test, exist_ok=True)
-
+    out_folder_train = os.path.join(out_dir, f"trains_{test_id}")
+    os.makedirs(out_folder_train, exist_ok=True)
+    out_folder_test = os.path.join(out_dir, f"tests_{test_id}")
+    os.makedirs(out_folder_test, exist_ok=True)
 
   # Procesar las imágenes de train
   for i in range(len(dataset_train)):
-      image_train = dataset_train.load_image(i)
-      labels_train = dataset_train.load_labels(i)
-      classes_train = dataset_train.load_class(i)
+        image_train = dataset_train.load_image(i)
+        labels_train = dataset_train.load_labels(i)
+        classes_train = dataset_train.load_class(i)
 
-      save_bbox_patches(
-          image_train,
-          labels_train,
-          classes_train,
-          output_dir=out_folder_train",
-          border_margin=3
-      )
+        save_bbox_patches(
+            image_train,
+            labels_train,
+            classes_train,
+            output_dir=out_folder_train,
+            border_margin=3
+        )
 
   # Procesar las imágenes de test
   for i in range(len(dataset_test)):
-      image_test = dataset_test.load_image(i)
-      labels_test = dataset_test.load_labels(i)
-      classes_test = dataset_test.load_class(i)
+        image_test = dataset_test.load_image(i)
+        labels_test = dataset_test.load_labels(i)
+        classes_test = dataset_test.load_class(i)
 
-      save_bbox_patches(
-          image_test,
-          labels_test,
-          classes_test,
-          output_dir=out_folder_test,
-          border_margin=3
-      )
+        save_bbox_patches(
+            image_test,
+            labels_test,
+            classes_test,
+            output_dir=out_folder_test,
+            border_margin=3
+        )
 
