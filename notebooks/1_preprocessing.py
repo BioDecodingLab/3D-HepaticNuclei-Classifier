@@ -11,171 +11,420 @@ import os
 import tifffile
 import numpy as np
 from skimage.measure import label, regionprops
+from scipy import ndimage as ndi
+from pathlib import Path
+from scipy import ndimage as ndi
 
-# Clase para cargar las imágenes, las máscaras y las etiquetas
+# Class to load images, labels, and classes
+
 class ImageDataset:
+    """
+    Dataset wrapper for microscopy images, instance labels and class maps.
+    """
+
     def __init__(self, image_paths, labels_paths, class_paths):
-        if len(image_paths) != len(class_paths):
-            raise ValueError("Las rutas de imágenes y máscaras deben coincidir.")
+
+        if not (len(image_paths) == len(labels_paths) == len(class_paths)):
+            raise ValueError(
+                "image_paths, labels_paths and class_paths must have the same length."
+            )
+
+        for p in image_paths + labels_paths + class_paths:
+            if not os.path.exists(p):
+                raise FileNotFoundError(p)
+
         self.image_paths = image_paths
         self.labels_paths = labels_paths
         self.class_paths = class_paths
 
-    def load_image(self, index=0):
-        return tifffile.imread(self.image_paths[index])
-
-    def load_labels(self, index=0):
-        return tifffile.imread(self.labels_paths[index])
-
-    def load_class(self, index=0):
-        return tifffile.imread(self.class_paths[index])
-
     def __len__(self):
         return len(self.image_paths)
 
-# Función para verificar si una región toca el borde de la imagen y exlcuir las celulas
-def _touches_border_3d(bbox, shape_zyx, border_margin=0):
-    min_z, min_y, min_x, max_z, max_y, max_x = bbox
-    Z, Y, X = shape_zyx
-    if min_z <= border_margin or min_y <= border_margin or min_x <= border_margin:
-        return True
-    if max_z >= (Z - border_margin) or max_y >= (Y - border_margin) or max_x >= (X - border_margin):
-        return True
-    return False
+    def __getitem__(self, index):
 
-def create_datasets(test_id, base_path):
+        image_path = self.image_paths[index]
+        label_path = self.labels_paths[index]
+        class_path = self.class_paths[index]
+
+        image = tifffile.imread(image_path)
+        labels = tifffile.imread(label_path)
+        class_map = tifffile.imread(class_path)
+
+        # Extract image name without extension
+        image_name = Path(image_path).stem
+
+        return image, labels, class_map, image_name
+
+    
+
+# Funtion to remove labesl form the borders
+
+def remove_border_labels(label_img, border_width=1, relabel=True, background=0):
     """
-    Create training and testing ImageDataset objects for leave-one-out validation.
+    Remove labeled objects that touch the image border within a given border width.
 
     Parameters
     ----------
-    test_id : int
-        Image ID used for testing (e.g., 1,2,3,4,5)
-    base_path : str
-        Base directory containing image_train, class_train, labels_train folders
+    label_img : np.ndarray
+        Labeled image (2D or 3D). Background is assumed to be `background`.
+        Object labels should be integer-valued.
+    border_width : int, default=1
+        Width of the border region (in pixels/voxels) to consider.
+        Any label touching this border region will be removed.
+    relabel : bool, default=True
+        If True, relabel remaining objects consecutively from 1..N.
+        If False, preserve original label IDs.
+    background : int, default=0
+        Background label value.
 
     Returns
     -------
-    dataset_train : ImageDataset
-    dataset_test : ImageDataset
+    cleaned : np.ndarray
+        Output label image with border-touching objects removed.
+    removed_labels : np.ndarray
+        Array of label IDs that were removed.
+    kept_labels : np.ndarray
+        Array of label IDs that remain in the output.
+
+    Notes
+    -----
+    - Works for 2D and 3D label images.
+    - A label is removed if *any* of its pixels/voxels falls inside the
+      specified border region.
+    - This implementation is vectorized and efficient for large label images.
     """
+    label_img = np.asarray(label_img)
 
-    all_ids = [1, 2, 3, 4, 5]
-    train_ids = [i for i in all_ids if i != test_id]
+    #print(f"{label_img.max()} nuclei detected before removing the ones at the border")
 
-    image_train_paths = [f"{base_path}/image/{i}.tif" for i in train_ids]
-    class_train_paths = [f"{base_path}/class/{i}.tif" for i in train_ids]
-    labels_train_paths = [f"{base_path}/labels/{i}.tif" for i in train_ids]
+    if label_img.ndim < 2:
+        raise ValueError("`label_img` must be at least 2D.")
+    if not np.issubdtype(label_img.dtype, np.integer):
+        raise TypeError("`label_img` must contain integer labels.")
+    if border_width < 1:
+        raise ValueError("`border_width` must be >= 1.")
 
-    image_test_paths = [f"{base_path}/image/{test_id}.tif"]
-    class_test_paths = [f"{base_path}/class/{test_id}.tif"]
-    labels_test_paths = [f"{base_path}/labels/{test_id}.tif"]
+    # Clamp border width so it never exceeds half the image extent along any axis
+    border_width = int(border_width)
+    shape = label_img.shape
+    max_valid_bw = min(max(1, s // 2) for s in shape)
+    border_width = min(border_width, max_valid_bw)
 
-    dataset_train = ImageDataset(
-        image_paths=image_train_paths,
-        class_paths=class_train_paths,
-        labels_paths=labels_train_paths
-    )
+    # Build border mask for arbitrary dimensionality (2D, 3D, ...)
+    border_mask = np.zeros(shape, dtype=bool)
 
-    dataset_test = ImageDataset(
-        image_paths=image_test_paths,
-        class_paths=class_test_paths,
-        labels_paths=labels_test_paths
-    )
+    for ax in range(label_img.ndim):
+        sl_low = [slice(None)] * label_img.ndim
+        sl_high = [slice(None)] * label_img.ndim
 
-    return dataset_train, dataset_test
+        sl_low[ax] = slice(0, border_width)
+        sl_high[ax] = slice(shape[ax] - border_width, shape[ax])
 
-# Función para guardar los parches generados
-def save_bbox_patches(image3d, labels_3d, classes_3d, output_dir, border_margin=0, min_voxels=0):
+        border_mask[tuple(sl_low)] = True
+        border_mask[tuple(sl_high)] = True
+
+    # Find all labels touching the border
+    border_labels = np.unique(label_img[border_mask])
+    border_labels = border_labels[border_labels != background]
+
+    # Remove them
+    cleaned = label_img.copy()
+    if border_labels.size > 0:
+        cleaned[np.isin(cleaned, border_labels)] = background
+
+    # Determine kept labels
+    kept_labels = np.unique(cleaned)
+    kept_labels = kept_labels[kept_labels != background]
+
+    # Optional consecutive relabeling
+    if relabel and kept_labels.size > 0:
+        # Fast lookup-table relabeling when labels are non-negative
+        if cleaned.min() >= 0:
+            lut = np.zeros(cleaned.max() + 1, dtype=cleaned.dtype)
+            lut[kept_labels] = np.arange(1, len(kept_labels) + 1, dtype=cleaned.dtype)
+            cleaned = lut[cleaned]
+            kept_labels = np.arange(1, len(kept_labels) + 1, dtype=cleaned.dtype)
+        else:
+            # Fallback for unusual cases with negative labels
+            relabeled = np.full_like(cleaned, background)
+            for new_id, old_id in enumerate(kept_labels, start=1):
+                relabeled[cleaned == old_id] = new_id
+            cleaned = relabeled
+            kept_labels = np.arange(1, len(kept_labels) + 1, dtype=cleaned.dtype)
+
+    #print(f"{cleaned.max()} nuclei detected after removing the ones at the border")
+
+    return cleaned, border_labels, kept_labels
+
+
+
+# Function to genretd and save patches
+
+def save_bbox_patches(
+    image3d,
+    labels_3d_all,
+    classes_3d,
+    output_dir,
+    image_name,
+    border_margin=3,
+    min_voxels=2000,
+    class_assignment="majority",   # "majority" or "max"
+    patch_dtype=np.float32,
+):
+    """
+    Save cropped masked patches from labeled 3D objects.
+
+    Parameters
+    ----------
+    image3d : np.ndarray
+        3D intensity image.
+    labels_3d_all : np.ndarray
+        3D labeled image. Background must be 0.
+    classes_3d : np.ndarray
+        3D class map with integer values. Background must be 0.
+    output_dir : str
+        Output directory.
+    image_name : str
+        Prefix used in saved filenames.
+    border_margin : int, default=3
+        Width of border region. Labels touching this border are removed.
+    min_voxels : int, default=1000
+        Minimum object size to save.
+    class_assignment : str, default="majority"
+        Rule to assign class to each object:
+        - "majority": most frequent nonzero class value inside object
+        - "max": maximum nonzero class value inside object
+    patch_dtype : dtype, default=np.float32
+        Output dtype for saved intensity patches.
+
+    Returns
+    -------
+    summary : dict
+        Small summary with counts.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Identificamos las clases presentes, excluyendo el fondo (valor 0)
-    classes_present = np.unique(classes_3d)
-    classes_present = classes_present[classes_present != 0]
+    # -----------------------------
+    # Basic input validation
+    # -----------------------------
+    if image3d.shape != labels_3d_all.shape or image3d.shape != classes_3d.shape:
+        raise ValueError(
+            f"Shape mismatch: image3d={image3d.shape}, "
+            f"labels_3d_all={labels_3d_all.shape}, classes_3d={classes_3d.shape}"
+        )
 
-    # Crear carpeta para cada clase
+    if class_assignment not in {"majority", "max"}:
+        raise ValueError("class_assignment must be either 'majority' or 'max'")
+
+
+    # -----------------------------
+    # Remove border-touching labels
+    # -----------------------------
+    labels_3d, removed_labels, kept_labels = remove_border_labels(
+        labels_3d_all,
+        border_width=border_margin,
+        relabel=True
+    )
+
+    if kept_labels.size == 0:
+        print("No labels remain after border removal.")
+        return {
+            "n_removed_border": int(len(removed_labels)),
+            "n_kept_after_border": 0,
+            "n_saved": 0,
+            "n_skipped_small": 0,
+            "n_skipped_no_class": 0,
+        }
+
+    # -----------------------------
+    # Create subfolder for classes
+    # -----------------------------
+
+    classes_present = np.sort(np.unique(classes_3d[classes_3d != 0]))
     for class_value in classes_present:
-        print(f"Procesando clase: {class_value}")
-        label_folder = os.path.join(output_dir, f"label_{class_value}")
-        os.makedirs(label_folder, exist_ok=True)
+        (Path(output_dir) / f"label_{class_value}").mkdir(parents=True, exist_ok=True)
 
-        # Obtener las propiedades de las regiones
-        props_image = regionprops(labels_3d, intensity_image=image3d)
-        props_class = regionprops(labels_3d, intensity_image=classes_3d)
-        idx = 0
+    # -----------------------------
+    # Region properties
+    # -----------------------------
+    props_image = regionprops(labels_3d, intensity_image=image3d)
+    props_class = regionprops(labels_3d, intensity_image=classes_3d)
 
-        # Iteramos sobre cada región y clase
-        for region, region_cls in zip(props_image, props_class):
-            label = region.label
-            if min_voxels > 0 and region.area < min_voxels:
-                continue
-            if _touches_border_3d(region.bbox, image3d.shape, border_margin=border_margin):
-                continue
+    idx = {c: 0 for c in classes_present}
+    n_skipped_small = 0
+    n_skipped_no_class = 0
 
-            # Obtenemos las intensidades y la clase de la región
-            intensities = region_cls.intensity_image
-            current_class = np.amax(np.unique(intensities[intensities != 0]))
+    for ii, (region, region_cls) in enumerate(zip(props_image, props_class)):
 
-            # Crear la carpeta para la clase específica si no existe
-            label_folder = os.path.join(output_dir, f"label_{current_class}")
-            os.makedirs(label_folder, exist_ok=True)
+        # Safety check: both regionprops lists should align
+        if region.label != region_cls.label:
+            raise RuntimeError(
+                f"Region mismatch: intensity label={region.label}, class label={region_cls.label}"
+            )
 
-            # Extraemos la imagen de la región
-            img = region.image_intensity.astype(np.float32)
-            mask = region.image_filled.astype(np.uint8)
-            masked_img = np.zeros_like(img)
-            masked_img[mask > 0] = img[mask > 0]
+        # Filter by size
+        if region.area < min_voxels:
+            n_skipped_small += 1
+            continue
 
-            # Guardamos la imagen con un nombre único
-            img_save_path = os.path.join(label_folder, f"cell_{idx}_img.tif")
-            tifffile.imwrite(img_save_path, masked_img)
+        
+        # Class assignment from class map inside the region crop
+        intensities = region_cls.intensity_image
+        mask = region.image.astype(np.uint8)  # exact object mask, not hole-filled
+        mask = ndi.binary_fill_holes(mask)
 
-            if idx % 100 == 0:
-                print(f"Guardando: {img_save_path}")
-            idx += 1
+        class_vals = intensities[mask > 0]
+        class_vals = class_vals[class_vals != 0]
 
-    print(f"Parches guardados correctamente en: {output_dir}")
+        if class_vals.size == 0:
+            n_skipped_no_class += 1
+            continue
+
+        if class_assignment == "max":
+            current_class = int(class_vals.max())
+        else:  # majority
+            current_class = int(np.bincount(class_vals.astype(np.int64)).argmax())
+
+        # define class folder (it should exist)
+        label_folder = os.path.join(output_dir, f"label_{current_class}")
+        #os.makedirs(label_folder, exist_ok=True)
+
+        # Extract cropped object patch masked by teh label
+        img = region.image_intensity.astype(patch_dtype, copy=True)
+        img[~mask] = 0
+
+        # Save patch
+        img_save_path = os.path.join(
+            label_folder,
+            #f"{image_name}_label{region.label}_nucleus_{idx+1}.tif"
+            f"img_{image_name}_nucleus_{idx[current_class]}.tif"
+        )
+        tifffile.imwrite(img_save_path, img)
+
+        if ii % 100 == 0:
+            print(f"Saving {ii}: {img_save_path}")
+
+        idx[current_class] += 1
+
+    print(f"Patches successfully saved in: {output_dir}")
+    print(f"Objects removed due to border contact: {len(removed_labels)}")
+    print(f"Objects saved: {idx}, in total {int(sum(idx.values()))}")
+    print(f"Objects skipped because size < {min_voxels}: {n_skipped_small}")
+    print(f"Objects skipped because no class was assigned: {n_skipped_no_class}")
+
+    return {
+        "n_removed_border": int(len(removed_labels)),
+        "n_kept_after_border": int(len(kept_labels)),
+        "n_saved": int(sum(idx.values())),
+        "saved_per_class": idx,
+        "n_skipped_small": int(n_skipped_small),
+        "n_skipped_no_class": int(n_skipped_no_class),
+    }
+
+
+
+def normalize_by_percentile(image, pmin=5, pmax=99.999, dtype=np.float32):
+    """
+    Normalize a 3D image to the range [0, 1] using percentile clipping.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input 3D image (Z,Y,X).
+    pmin : float, default=5
+        Lower percentile used for normalization.
+    pmax : float, default=99.99
+        Upper percentile used for normalization.
+    dtype : numpy dtype, default=np.float32
+        Output data type.
+
+    Returns
+    -------
+    image_norm : np.ndarray
+        Normalized image with values in [0, 1].
+    """
+
+    image = image.astype(dtype, copy=False)
+
+    # Print before normalization
+    print(f"[Before norm] min={image.min():.6f}, max={image.max():.6f}")
+
+    lo = np.percentile(image, pmin)
+    hi = np.percentile(image, pmax)
+
+    print(f"Percentiles: pmin({pmin})={lo:.6f}, pmax({pmax})={hi:.6f}")
+
+    if hi <= lo:
+        raise ValueError("Invalid percentiles: pmax must be greater than pmin")
+
+    image_norm = (image - lo) / (hi - lo + 1e-30)
+    image_norm = np.clip(image_norm, 0, 1)
+
+    # Print after normalization
+    print(f"[After norm] min={image_norm.min():.6f}, max={image_norm.max():.6f}")
+
+    return image_norm
+
 
 ### Calculations:
 
-input_dir = "/content/drive/MyDrive/tesis"
-out_dir = "/content/drive/MyDrive/tesis/patches"
-os.makedirs(out_dir, exist_ok=True)
 
-for test_id in [1,2,3,4,5]:
-    dataset_train, dataset_test = create_datasets(test_id, input_dir)
-    print(f"Test image: {test_id}")
 
-    out_folder_train = os.path.join(out_dir, f"trains_{test_id}")
-    os.makedirs(out_folder_train, exist_ok=True)
-    out_folder_test = os.path.join(out_dir, f"tests_{test_id}")
-    os.makedirs(out_folder_test, exist_ok=True)
 
-  # Procesar las imágenes de train
-  for i in range(len(dataset_train)):
-        image_train = dataset_train.load_image(i)
-        labels_train = dataset_train.load_labels(i)
-        classes_train = dataset_train.load_class(i)
+input_dir = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/")
+out_dir = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/patches/")
+out_dir.mkdir(parents=True, exist_ok=True)
 
-        save_bbox_patches(
-            image_train,
-            labels_train,
-            classes_train,
-            output_dir=out_folder_train,
-            border_margin=3
-        )
+image_dir = input_dir / "image"
+labels_dir = input_dir / "labels"
+class_dir = input_dir / "class"
 
-  # Procesar las imágenes de test
-  for i in range(len(dataset_test)):
-        image_test = dataset_test.load_image(i)
-        labels_test = dataset_test.load_labels(i)
-        classes_test = dataset_test.load_class(i)
+# read all tiff images
+image_path = sorted(list(image_dir.glob("*.tif")) + list(image_dir.glob("*.tiff")))
 
-        save_bbox_patches(
-            image_test,
-            labels_test,
-            classes_test,
-            output_dir=out_folder_test,
-            border_margin=3
-        )
+image_paths = []
+labels_paths = []
+class_paths = []
+
+for img_path in image_path:
+    name = img_path.stem
+    image_paths.append(str(image_dir / f"{name}.tif"))
+    labels_paths.append(str(labels_dir / f"{name}.tif"))
+    class_paths.append(str(class_dir / f"{name}.tif"))
+
+# create dataset
+dataset = ImageDataset(
+    image_paths=image_paths,
+    labels_paths=labels_paths,
+    class_paths=class_paths
+)
+
+print(f"Found {len(dataset)} images")
+
+for i in range(len(dataset)):
+
+    image, labels, classes, image_name = dataset[i]
+
+    print(f"\nProcessing image: {image_name}")
+
+    # Normalize image
+    image = normalize_by_percentile(image,pmin=30, pmax=99.999)
+
+    # create output folder per image
+    out_folder = out_dir / f"img_{image_name}"
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    save_bbox_patches(
+        image,
+        labels,
+        classes,
+        output_dir=str(out_folder),
+        image_name=image_name,
+        border_margin=3,
+        min_voxels=2500
+    )
+
+print("\nAll patches generated successfully.")
+
+
 
