@@ -153,10 +153,15 @@ Packages (3DINO embeddings)
 3D-HepaticNuclei-Classifier/
 
 ├── notebooks/               # Current folder containing project scripts
+
 ├── data/                    # Reserved for raw/processed data (It does not contain the photos)
+
 ├── results/                 # Reserved for generated outputs ((They are generated directly in the scripts and the save path is changed))
+
 ├── LICENSE
+
 ├── LOG.md
+
 └── README.md
 
 
