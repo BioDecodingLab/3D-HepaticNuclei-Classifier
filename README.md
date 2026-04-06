@@ -51,29 +51,83 @@ This repository accompanies the thesis work:
 
 The notebooks are numbered and must be executed in order:
 
-**Notebook 1 — Data preprocessing**
+## 🚀 Running the project (Execution order)
 
-Loads the raw 3D volumes
+### **1. Patch size inspection**
+**Files:**
+- `1_1_get_patches_sizes.py`
+- `1_1_get_patches_sizes_all.py`
 
-Applies the required preprocessing (e.g., normalization + crop/pad to the target size)
+**Description:**
+- Inspects patch or bounding-box sizes in the 3D volumes  
+- Helps define preprocessing parameters before standardization  
 
-Saves the processed dataset ready for embedding extraction
+---
 
-**Notebook 2 — Embedding extraction (3DINO / ViT features)**
+### **2. Data preprocessing**
+**Files:**
+- `dataset_helper.py`
+- `1_preprocessing.py`
 
-Loads the preprocessed volumes from Notebook 1
+**Description:**
+- Loads raw 3D volumes  
+- Applies preprocessing such as normalization and crop/pad  
+- Saves the processed dataset ready for embedding extraction  
 
-Albumentations and Extracts embeddings 
+---
 
-Saves embeddings
+### **3. Embedding extraction (3DINO / ViT features)**
+**File:**
+- `2_embedding_extraction.py`
 
-**Notebook 3 — Random Forest classifier**
+**Description:**
+- Loads the preprocessed volumes  
+- Applies augmentations if configured  
+- Extracts embeddings using 3DINO / Vision Transformer  
+- Saves the resulting feature vectors  
 
-Loads the embeddings from Notebook 2
+---
 
-Trains and evaluates the Random Forest model
+### **4. Cross-validation split**
+**File:**
+- `3_cross_validation_data.py`
 
-Reports metrics (e.g., accuracy / F1 / confusion matrix) and saves the trained model if configured
+**Description:**
+- Creates the train/validation/test folds  
+- Organizes the evaluation setup for downstream classifiers  
+
+---
+
+### **5. Classical model training**
+**File:**
+- `4_run_models.py`
+
+**Description:**
+- Loads the embeddings  
+- Trains and evaluates classical machine learning models such as:  
+  - **Random Forest**  
+  - **Support Vector Machine**  
+  - **Logistic Regression**  
+
+---
+
+### **6. Statistics and visualization**
+**File:**
+- `5_box_plot_and_statistics_all_models.py`
+
+**Description:**
+- Summarizes model performance  
+- Generates boxplots and statistical comparisons across models  
+
+---
+
+### **7. Interpretability analysis**
+**File:**
+- `6_shap_interpretability_test.py`
+
+**Description:**
+- Applies SHAP-based interpretability analysis  
+- Identifies the most influential features for model predictions  
 
 ## Dependencies and versions
 
