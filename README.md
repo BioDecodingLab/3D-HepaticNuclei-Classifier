@@ -51,8 +51,6 @@ This repository accompanies the thesis work:
 
 The notebooks are numbered and must be executed in order:
 
-## 🚀 Running the project (Execution order)
-
 ### **1. Patch size inspection**
 **Files:**
 - `1_1_get_patches_sizes.py`
