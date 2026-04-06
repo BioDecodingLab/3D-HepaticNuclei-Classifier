@@ -167,8 +167,8 @@ This project uses 3D confocal microscopy volumes of mouse liver tissue, provided
 Each nucleus is segmented via bounding boxes and annotated into classes such as:
 
 1. Hepatocyte
-2. Kupffer cell
-3. Stellate cell
+2. Stellate cell
+3. Kupffer cell
 4. Endothelial cell
 5. Other cell
 
