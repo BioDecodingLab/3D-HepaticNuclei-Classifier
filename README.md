@@ -151,51 +151,23 @@ Packages (3DINO embeddings)
 
 ## Repository Structure
 
+## Repository Structure
+
 3D-HepaticNuclei-Classifier/
 
-├─ 📁 data/
-
-│  ├─ 📁 raw/                # Raw microscopy volumes (not included)
-
-│  ├─ 📁 processed/          # Crops/patches from bounding boxes
-
-│  └─ 📁 embeddings/         # 3DINO embeddings (.npy)
-
-├─ 📁 src/
-
-│  ├─ 📁 preprocessing/      # Bounding-box extraction & 3D preprocessing
-
-│  ├─ 📁 dino/               # 3DINO feature extraction
-
-│  ├─ 📁 models/             # RF / SVM / MLP model definitions
-
-│  ├─ 📁 training/           # Training & evaluation scripts
-
-│  └─ 📁 utils/              # Metrics, plots, helpers
-
-├─ 📁 notebooks/
-
-│  ├─ 1_preprocessing.ipynb
-
-│  ├─ 2_embedding_extraction.ipynb
-
-│  ├─ 3_training_classifiers.ipynb
-
-│  └─ 4_evaluation.ipynb
-
-├─ 📁 results/
-
-│  ├─ 📁 metrics/            # Scores, confusion matrices
-
-│  └─ 📁 figures/            # Publication-ready plots
-
-├─ environment.yml
-
-├─ requirements.txt
-
-├─ LICENSE
-
-└─ README.md
+├── 1_1_get_patches_sizes.py
+├── 1_1_get_patches_sizes_all.py
+├── dataset_helper.py
+├── 1_preprocessing.py
+├── 2_embedding_extraction.py
+├── 3_cross_validation_data.py
+├── 4_run_models.py
+├── 5_box_plot_and_statistics_all_models.py
+├── 6_shap_interpretability_test.py
+├── environment.yml
+├── requirements.txt
+├── LICENSE
+└── README.md
 
 
 ## Dataset (Link to Zenodo dataset)
@@ -212,35 +184,14 @@ Each nucleus is segmented via bounding boxes and annotated into classes such as:
 
 
 
-## Getting Started
-
-1. Install environment
-
-conda env create -f environment.yml
-conda activate hepatic-nuclei
-
-2. Extract patches
-
-
-3. Extract 3DINO embeddings
-
-
-4. Train classifiers
-  
-5. Evaluate
-
-6. Reaconstruct whole image
-
-
 ## Results 
-Classifier	Accuracy	F1 (macro)	Notes
 
-Random Forest	0.6739	0.5001	Fast, robust
 
-SVM	
+| Classifier | Accuracy | F1 (macro) | Balanced Accuracy | AUC macro OVR | Notes |
+|-----------|----------|------------|-------------------|---------------|-------|
+| Support Vector Machine + 1000 | 0.8220 | 0.6075 | 0.6569 | 0.9339 | Main reported configuration |
 
-MLP	
-
+Although this Support Vector Machine configuration is highlighted as a representative result, statistical analysis did not show a single classifier to be significantly superior overall. The findings suggest that performance was driven mainly by the quality of the 3DINO embeddings rather than by the choice of downstream classifier.
 
 ## Citation
 
