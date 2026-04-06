@@ -149,22 +149,33 @@ Packages (3DINO embeddings)
 
 ## Repository Structure
 
-## Repository Structure
 
 3D-HepaticNuclei-Classifier/
 
 ├── 1_1_get_patches_sizes.py
+
 ├── 1_1_get_patches_sizes_all.py
+
 ├── dataset_helper.py
+
 ├── 1_preprocessing.py
+
 ├── 2_embedding_extraction.py
+
 ├── 3_cross_validation_data.py
+
 ├── 4_run_models.py
+
 ├── 5_box_plot_and_statistics_all_models.py
+
 ├── 6_shap_interpretability_test.py
+
 ├── environment.yml
+
 ├── requirements.txt
+
 ├── LICENSE
+
 └── README.md
 
 
