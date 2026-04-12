@@ -165,3 +165,106 @@ Rather than by hyperparameter optimization alone.
   - Data distribution and class overlap
   - Domain shift effects
 - Rather than by hyperparameter optimization alone.
+
+
+**Date:** 05/03/2026
+
+**Objective:** Refine preprocessing, expand model development, and improve pipeline performance.
+
+### Preprocessing and Embeddings
+
+- Applied crop/pad operations to standardize nuclei volumes before the final input size.
+- Tested preprocessing with crop/pad to **50³** as an intermediate step before resizing to **112³**.
+- Evaluated the effect of this strategy on morphological preservation and embedding quality.
+- Continued feature extraction using 3DINO-ViT under the updated preprocessing workflow.
+
+### Model Development
+
+- Started building the additional classification models for downstream evaluation:
+  - Random Forest
+  - Logistic Regression
+  - Support Vector Machine
+  - Multilayer Perceptron
+
+### Hyperparameter Optimization
+
+- Performed hyperparameter tuning under the revised preprocessing setting.
+- Compared preprocessing alternatives in terms of their effect on downstream classification results.
+- Maintained validation controls to ensure fair comparison between configurations.
+
+### General Observation
+
+- The preprocessing strategy had a direct effect on embedding quality and model performance.
+- Preserving morphological consistency remained essential for robust classification.
+
+---
+
+**Date:** 19/03/2026
+
+**Objective:** Evaluate model behavior without redundant balancing settings.
+
+### Classification Configuration
+
+- Tested the classification pipeline without applying the class-balancing parameter.
+- Verified performance using already balanced image sets, avoiding unnecessary balancing during training.
+- Assessed whether removing this parameter affected the stability and fairness of the models.
+
+### Preprocessing and Training
+
+- Continued experiments with the selected preprocessing configuration.
+- Compared results obtained with and without the balancing parameter in order to determine its real contribution.
+- Preserved the same validation strategy to ensure comparability.
+
+### General Observation
+
+- Since the dataset had already been balanced beforehand, the class-balancing parameter was no longer necessary.
+- Removing this parameter simplified the configuration without negatively affecting the training setup.
+
+---
+
+**Date:** 26/03/2026
+
+**Objective:** Consolidate results and finalize the written analysis.
+
+### Results Consolidation
+
+- Completed the writing of the results section.
+- Organized the main findings from preprocessing, embedding extraction, training, and validation.
+- Integrated performance comparisons across experimental settings.
+
+### Documentation
+
+- Finalized the description of the methodology and experimental pipeline.
+- Structured the written interpretation of the main metrics and observations.
+- Consolidated the technical explanation of the improvements introduced across iterations.
+
+### General Observation
+
+- By this stage, the experimental results were sufficiently stable to support the final written discussion.
+- The focus shifted from experimentation to reporting and interpretation.
+
+---
+
+**Date:** 12/04/2026
+
+**Objective:** Finalize the experimental comparison and consolidate complete model results.
+
+### Models Evaluated
+
+- Obtained the complete results for all classification models:
+  - Random Forest
+  - Logistic Regression
+  - Support Vector Machine
+  - Multilayer Perceptron
+- Included results for all augmentation settings and all hyperparameter optimization improvements.
+
+### Final Adjustments
+
+- Removed the class-balancing parameter from training because the classes had already been balanced beforehand.
+- Standardized the final configuration used for model comparison.
+- Consolidated the final evaluation setup for all selected classifiers.
+
+### General Observation
+
+- The final comparison included all models, their augmentation variants, and their optimized hyperparameter settings.
+- This enabled a complete and consistent interpretation of the experimental results.
