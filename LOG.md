@@ -224,30 +224,30 @@ Rather than by hyperparameter optimization alone.
 
 **Date:** 26/03/2026
 
-**Objective:** Consolidate results and finalize the written analysis.
+**Objective:** Consolidate intermediate results and advance the written analysis.
 
 ### Results Consolidation
 
-- Completed the writing of the results section.
+- Advanced the drafting of the results section.
 - Organized the main findings from preprocessing, embedding extraction, training, and validation.
-- Integrated performance comparisons across experimental settings.
+- Integrated preliminary performance comparisons across experimental settings.
 
 ### Documentation
 
-- Finalized the description of the methodology and experimental pipeline.
-- Structured the written interpretation of the main metrics and observations.
+- Continued refining the description of the methodology and experimental pipeline.
+- Structured the preliminary interpretation of the main metrics and observations.
 - Consolidated the technical explanation of the improvements introduced across iterations.
 
 ### General Observation
 
-- By this stage, the experimental results were sufficiently stable to support the final written discussion.
-- The focus shifted from experimentation to reporting and interpretation.
+- By this stage, the experimental results were sufficiently stable to support an initial written discussion.
+- The work began to shift progressively from experimentation to analysis and reporting.
 
 ---
 
 **Date:** 12/04/2026
 
-**Objective:** Finalize the experimental comparison and consolidate complete model results.
+**Objective:** Finalize the experimental stage and complete the final written results.
 
 ### Models Evaluated
 
@@ -263,6 +263,12 @@ Rather than by hyperparameter optimization alone.
 - Removed the class-balancing parameter from training because the classes had already been balanced beforehand.
 - Standardized the final configuration used for model comparison.
 - Consolidated the final evaluation setup for all selected classifiers.
+
+### Documentation and Closure
+
+- Finalized the writing of the experimental results section.
+- Consolidated the final interpretation after completing all model comparisons.
+- Closed the experimental stage with the complete integration of results, augmentations, and optimized configurations.
 
 ### General Observation
 
