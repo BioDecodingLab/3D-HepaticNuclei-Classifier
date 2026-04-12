@@ -192,6 +192,14 @@ Although this Support Vector Machine configuration is highlighted as a represent
 
 If you use this code, please cite:
 
+@article{xu3dino2025,
+  title={A generalizable 3D framework and model for self-supervised learning in medical imaging},
+  author={Xu, Tony and Hosseini, Sepehr and Anderson, Chris and Rinaldi, Anthony and Krishnan, Rahul G. and Martel, Anne L. and Goubran, Maged},
+  journal={npj Digital Medicine},
+  year={2025},
+  doi={10.1038/s41746-025-02035-w},
+}
+
 @article{Teran2026Hepatic3DNuclei,
   title={Automated classification of hepatic 3D nuclear morphotypes using self-supervised 3D DINO embeddings},
   author={Terán Ballagán, A. C. and Morales-Navarrete, H. A.},
