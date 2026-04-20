@@ -51,18 +51,7 @@ This repository accompanies the thesis work:
 
 The notebooks are numbered and must be executed in order:
 
-### **1. Patch size inspection**
-**Files:**
-- `1_1_get_patches_sizes.py`
-- `1_1_get_patches_sizes_all.py`
-
-**Description:**
-- Inspects patch or bounding-box sizes in the 3D volumes  
-- Helps define preprocessing parameters before standardization  
-
----
-
-### **2. Data preprocessing**
+### **1. Data preprocessing**
 **Files:**
 - `dataset_helper.py`
 - `1_preprocessing.py`
@@ -71,6 +60,17 @@ The notebooks are numbered and must be executed in order:
 - Loads raw 3D volumes  
 - Applies preprocessing such as normalization and crop/pad  
 - Saves the processed dataset ready for embedding extraction  
+
+---
+
+### **1.1 Patch size inspection**
+**Files:**
+- `1_1_get_patches_sizes.py`
+- `1_1_get_patches_sizes_all.py`
+
+**Description:**
+- Inspects patch or bounding-box sizes in the 3D volumes  
+- Helps define preprocessing parameters before standardization  
 
 ---
 
