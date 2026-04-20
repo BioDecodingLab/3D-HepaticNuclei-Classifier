@@ -74,7 +74,7 @@ The notebooks are numbered and must be executed in order:
 
 ---
 
-### **3. Embedding extraction (3DINO / ViT features)**
+### **2. Embedding extraction (3DINO / ViT features)**
 **File:**
 - `2_embedding_extraction.py`
 
@@ -86,7 +86,7 @@ The notebooks are numbered and must be executed in order:
 
 ---
 
-### **4. Cross-validation split**
+### **3. Cross-validation split**
 **File:**
 - `3_cross_validation_data.py`
 
@@ -96,7 +96,7 @@ The notebooks are numbered and must be executed in order:
 
 ---
 
-### **5. Classical model training**
+### **4. Classical model training**
 **File:**
 - `4_run_models.py`
 
@@ -109,7 +109,7 @@ The notebooks are numbered and must be executed in order:
 
 ---
 
-### **6. Statistics and visualization**
+### **5. Statistics and visualization**
 **File:**
 - `5_box_plot_and_statistics_all_models.py`
 
@@ -119,7 +119,7 @@ The notebooks are numbered and must be executed in order:
 
 ---
 
-### **7. Interpretability analysis**
+### **6. Interpretability analysis**
 **File:**
 - `6_shap_interpretability_test.py`
 
