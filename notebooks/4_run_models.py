@@ -1,842 +1,464 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Direct 3D patch classification from TIFF volumes using:
-1) 3D DINO backbone + trainable classification head
-2) 3D ResNet classifier
-
-Cross-validation is folder-based:
-patches_dir/
-    img_1/
-        label_1/*.tif
-        label_2/*.tif
-        ...
-    img_2/
-        ...
-Each img_* folder is one held-out test fold.
-
-This script assumes you already have available:
-- normalize_image
-- center_pad_3d
-- augment_3dimage
-- load_and_merge_config_3d
-- build_model_for_eval
-
-and that your dataset class generation logic should remain unchanged.
+Cross-validation benchmark script with:
+- hyperparameter search per fold
+- final refit on train+val
+- ROC curves per class (OvR)
+- pooled ROC across folds
+- explicit saving of best refit model per fold
 """
-import sys
-sys.path.append(".../Nuclei3DClassification/code/3DINO")
 
 import os
-import gc
-import glob
 import json
-import math
-import copy
-import time
-import random
+import warnings
 from pathlib import Path
-from collections import Counter
 
-
-
+import joblib
 import numpy as np
 import pandas as pd
-import tifffile as tiff
-import skimage.transform
 import matplotlib.pyplot as plt
 
-from tqdm import tqdm
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
-from torch.cuda.amp import autocast
-from torch.amp import GradScaler
-import torch.nn.functional as F
-
+from joblib import Parallel, delayed
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, label_binarize
+from sklearn.decomposition import PCA
+from sklearn.model_selection import ParameterGrid
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
     log_loss,
+    roc_auc_score,
+    roc_curve
 )
-from sklearn.model_selection import ParameterGrid, StratifiedShuffleSplit
 
-from dinov2.eval.setup import build_model_for_eval
-from dinov2.configs import load_and_merge_config_3d
-from dataset_helper import *
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# =============================================================================
+import time
+
+#print("Pausing for 1 hour...")
+#time.sleep(25000)  # 3600 seconds = 1 hour
+#print("Resuming...")
+
+# ============================================================
 # USER CONFIG
-# =============================================================================
+# ============================================================
 
-SEED = 42
+INPUT_DIR = ".../Nuclei3DClassification/data/embedding_4000_cv"
+OUTPUT_ROOT = ".../Nuclei3DClassification/results/optimized/cv_benchmark_results_4000_cv"
 
-patches_dir  = Path(".../Nuclei3DClassification/data/patches/")
-labels = [1, 2, 3, 4, 5]
-target_DHW0 = (70,70,70)
-target_DHW  = (112, 112, 112)
+LABEL_ORDER = [1, 2, 3, 4, 5]
+CLASS_NAMES = ["Hepatocyte", "Stellate", "Kupffer", "Endotelial", "Other"]
 
-batch_size = 256
-num_workers = 48
+RANDOM_STATE = 42
+MODEL_NAMES = ["logreg", "rf", "svm", "mlp"]  # choose from: "logreg", "rf", "svm", "mlp"
 
-config_file = ".../Nuclei3DClassification/code/3DINO/dinov2/configs/train/vit3d_highres"
-pretrained_weights = ".../Nuclei3DClassification/data/3dino_vit_weights.pth"
+# Parallelism:
+# This parallelizes hyperparameter combinations WITHIN each fold.
+# Folds themselves are processed sequentially to avoid CPU oversubscription.
+N_JOBS_SEARCH = 48
+VERBOSE_SEARCH = 10
 
-output_root = Path(".../Nuclei3DClassification/results/direct_patch_classification")
-
-CLASS_NAMES = [f"label_{x}" for x in labels]
-LABEL_ORDER = labels
-NUM_CLASSES = len(labels)
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Whether to save train/val diagnostic metrics per fold
+SAVE_DIAGNOSTIC_TRAIN_VAL = True
 
 
-# =============================================================================
-# REPRODUCIBILITY
-# =============================================================================
+# ============================================================
+# PARAMETER GRIDS
+# ============================================================
 
-def seed_everything(seed=SEED):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
+PARAM_GRIDS = {
+    "logreg": {
+        "pca__n_components": [0.95, 0.5],
+        "pca__whiten": [True, False],
+        "clf__C": [0.001, 0.01, 0.1, 1, 10, 50],
+        "clf__penalty": ["l2"],
+        "clf__class_weight": [None],
+    },
+    "rf": {
+        "pca__n_components": [0.95, 0.5],
+        "pca__whiten": [False],
+        "clf__n_estimators": [200, 300],
+        "clf__max_depth": [None, 10, 20],
+        "clf__min_samples_split": [5, 10],
+        "clf__min_samples_leaf": [2, 4],
+        "clf__max_features": ["sqrt"],
+        "clf__class_weight": [None],
+    },
+    "svm": {
+        "pca__n_components": [0.95, 0.5],
+        "pca__whiten": [True, False],
+        "clf__C": [0.001, 0.01, 0.1, 1, 10],
+        "clf__kernel": ["rbf"],
+        "clf__gamma": ["scale", 1e-3],
+        "clf__class_weight": [None],
+    },
+    "mlp": {
+        "pca__n_components": [0.95, 0.5],
+        "pca__whiten": [False],
+        "clf__hidden_layer_sizes": [
+            (256, 128),
+            (512, 256),
+            (256, 128, 64)
+        ],
+        "clf__alpha": [1e-4, 1e-3],
+        "clf__learning_rate_init": [1e-3, 5e-4],
+        "clf__batch_size": [64, 128]
+    }
+}
 
 
-def seed_worker(worker_id):
-    worker_seed = SEED + worker_id
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-g = torch.Generator()
-g.manual_seed(SEED)
-
-
-# =============================================================================
+# ============================================================
 # HELPERS
-# =============================================================================
+# ============================================================
 
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
-def collect_fold_dirs(patches_root: Path):
-    fold_dirs = sorted([p for p in patches_root.iterdir() if p.is_dir() and p.name.startswith("img_")])
-    if len(fold_dirs) == 0:
-        raise FileNotFoundError(f"No img_* folders found in: {patches_root}")
-    return fold_dirs
+def print_class_counts(y, split_name):
+    counts = pd.Series(y).value_counts().sort_index()
+    print(f"{split_name} counts:", counts.to_dict())
 
 
-def build_dataset_for_folders(folder_list, do_aug=False, target_per_label=None, seed=SEED):
-    datasets = []
-    for fold_dir in folder_list:
-        ds = Tif3DDatasetSingle(
-            base_dir=str(fold_dir),
-            labels=labels,
-            target_dhw0=target_DHW0,
-            target_dhw=target_DHW,
-            target_per_label=target_per_label,
-            do_aug=do_aug,
-            seed=seed,
+def filter_valid_pca_components(param_grid, X_train):
+    """
+    Keep only valid PCA integer components.
+    Floats like 0.95 are always kept.
+    """
+    filtered = dict(param_grid)
+    max_valid = min(X_train.shape[0], X_train.shape[1])
+
+    valid_components = []
+    for val in filtered["pca__n_components"]:
+        if isinstance(val, float):
+            if 0 < val < 1:
+                valid_components.append(val)  # variance-based PCA
+            elif val.is_integer() and val <= max_valid:
+                valid_components.append(int(val))
+        elif isinstance(val, int) and val <= max_valid:
+            valid_components.append(val)
+
+    if len(valid_components) == 0:
+        raise ValueError(
+            f"No valid PCA components remain. "
+            f"Requested={filtered['pca__n_components']}, max_valid={max_valid}"
         )
-        datasets.append(ds)
 
-    if len(datasets) == 1:
-        return datasets[0]
-    return ConcatDataset(datasets)
+    filtered["pca__n_components"] = valid_components
+    return filtered
 
 
-def extract_labels_from_dataset(dataset):
-    ys = []
-    if isinstance(dataset, ConcatDataset):
-        for ds in dataset.datasets:
-            ys.extend([y for _, y in ds.items])
+def serialize_best_params(best_row):
+    """
+    Extract hyperparameters from best_row and fix pandas dtype coercions.
+    """
+    best_params = {}
+    for k, v in best_row.items():
+        if k.startswith("pca__") or k.startswith("clf__"):
+            best_params[k] = v
+
+    # RF: max_depth may come back as float or NaN after pandas
+    if "clf__max_depth" in best_params:
+        v = best_params["clf__max_depth"]
+        if pd.isna(v):
+            best_params["clf__max_depth"] = None
+        else:
+            best_params["clf__max_depth"] = int(v)
+
+    # RF integer params
+    for k in ["clf__n_estimators", "clf__min_samples_split", "clf__min_samples_leaf"]:
+        if k in best_params and not pd.isna(best_params[k]):
+            best_params[k] = int(best_params[k])
+
+    # MLP batch size
+    if "clf__batch_size" in best_params and not pd.isna(best_params["clf__batch_size"]):
+        best_params["clf__batch_size"] = int(best_params["clf__batch_size"])
+
+    # PCA integer components, but keep variance fractions like 0.95 / 0.5
+    if "pca__n_components" in best_params:
+        v = best_params["pca__n_components"]
+        if isinstance(v, float) and v >= 1 and float(v).is_integer():
+            best_params["pca__n_components"] = int(v)
+
+    return best_params
+
+
+def build_pipeline(model_name, params, random_state=42):
+    pca = PCA(
+        n_components=params["pca__n_components"],
+        whiten=params["pca__whiten"],
+        random_state=random_state
+    )
+
+    if model_name == "logreg":
+        clf = LogisticRegression(
+            C=params["clf__C"],
+            penalty=params["clf__penalty"],
+            solver="lbfgs",
+            class_weight=params["clf__class_weight"],
+            max_iter=5000,
+            random_state=random_state,
+            multi_class="multinomial"
+        )
+
+    elif model_name == "rf":
+        max_depth = params["clf__max_depth"]
+        if pd.isna(max_depth):
+            max_depth = None
+        elif max_depth is not None:
+            max_depth = int(max_depth)
+
+        clf = RandomForestClassifier(
+            n_estimators=int(params["clf__n_estimators"]),
+            max_depth=max_depth,
+            min_samples_split=int(params["clf__min_samples_split"]),
+            min_samples_leaf=int(params["clf__min_samples_leaf"]),
+            max_features=params["clf__max_features"],
+            class_weight=params["clf__class_weight"],
+            random_state=random_state,
+            bootstrap=True,
+            n_jobs=1
+        )
+
+    elif model_name == "svm":
+        clf = SVC(
+            C=params["clf__C"],
+            kernel=params["clf__kernel"],
+            gamma=params["clf__gamma"],
+            class_weight=params["clf__class_weight"],
+            probability=True,
+            random_state=random_state
+        )
+
+    elif model_name == "mlp":
+        clf = MLPClassifier(
+            hidden_layer_sizes=params["clf__hidden_layer_sizes"],
+            activation="relu",
+            solver="adam",
+            alpha=params["clf__alpha"],
+            batch_size=int(params["clf__batch_size"]),
+            learning_rate_init=params["clf__learning_rate_init"],
+            max_iter=500,
+            shuffle=True,
+            random_state=random_state,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=15,
+            verbose=False
+        )
+
     else:
-        ys.extend([y for _, y in dataset.items])
-    return np.asarray(ys, dtype=int)
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        ("pca", pca),
+        ("clf", clf)
+    ])
 
 
-def make_train_val_subsets(dataset, val_fraction=0.10, random_state=SEED):
-    y_all = extract_labels_from_dataset(dataset)
+def compute_metrics(y_true, y_pred, split_name):
+    overall = {
+        "split": split_name,
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall_weighted": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
+        "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred)
+    }
 
-    idx_all = np.arange(len(y_all))
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_fraction, random_state=random_state)
-    train_idx, val_idx = next(splitter.split(idx_all, y_all))
-
-    train_subset = Subset(dataset, train_idx)
-    val_subset = Subset(dataset, val_idx)
-
-    return train_subset, val_subset
-
-
-def subset_labels(subset):
-    if not isinstance(subset, Subset):
-        raise TypeError("Expected a torch.utils.data.Subset")
-    base = subset.dataset
-    labels_out = []
-
-    if isinstance(base, ConcatDataset):
-        cumulative = np.cumsum([0] + [len(ds) for ds in base.datasets])
-        for idx in subset.indices:
-            ds_id = np.searchsorted(cumulative, idx, side="right") - 1
-            local_idx = idx - cumulative[ds_id]
-            _, y = base.datasets[ds_id].items[local_idx]
-            labels_out.append(y)
-    else:
-        for idx in subset.indices:
-            _, y = base.items[idx]
-            labels_out.append(y)
-
-    return np.asarray(labels_out, dtype=int)
-
-
-def compute_class_weights(y, label_order):
-    counts = Counter(y.tolist())
-    n = len(y)
-    k = len(label_order)
-    weights = []
-    for c in label_order:
-        count_c = counts.get(c, 1)
-        weights.append(n / (k * count_c))
-    return torch.tensor(weights, dtype=torch.float32)
-
-
-def remap_labels_to_zero_based(y_np, label_order):
-    mapping = {lab: i for i, lab in enumerate(label_order)}
-    return np.asarray([mapping[v] for v in y_np], dtype=np.int64)
-
-
-def remap_tensor_labels(y_tensor, label_order):
-    mapping = {lab: i for i, lab in enumerate(label_order)}
-    out = torch.empty_like(y_tensor, dtype=torch.long)
-    for src, dst in mapping.items():
-        out[y_tensor == src] = dst
-    return out
-
-
-def save_confusion_matrix(y_true, y_pred, out_path, title, normalize=None, class_names=None):
-    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)) if class_names else None, normalize=normalize)
-
-    plt.figure(figsize=(8, 7))
-    plt.imshow(cm, interpolation="nearest")
-    plt.title(title)
-    plt.colorbar()
-    tick_marks = np.arange(len(class_names))
-    plt.xticks(tick_marks, class_names, rotation=45, ha="right")
-    plt.yticks(tick_marks, class_names)
-
-    fmt = ".2f" if normalize is not None else "d"
-    thresh = cm.max() / 2.0 if cm.size > 0 else 0.0
-
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            val = cm[i, j]
-            plt.text(j, i, format(val, fmt),
-                     ha="center", va="center",
-                     color="white" if val > thresh else "black")
-
-    plt.ylabel("True label")
-    plt.xlabel("Predicted label")
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def compute_metrics(y_true_zero, y_pred_zero, prefix_name="Test"):
-    acc = accuracy_score(y_true_zero, y_pred_zero)
-    bal_acc = balanced_accuracy_score(y_true_zero, y_pred_zero)
-
-    prec_w, rec_w, f1_w, _ = precision_recall_fscore_support(
-        y_true_zero, y_pred_zero, average="weighted", zero_division=0
-    )
-    prec_m, rec_m, f1_m, _ = precision_recall_fscore_support(
-        y_true_zero, y_pred_zero, average="macro", zero_division=0
+    report_dict = classification_report(
+        y_true,
+        y_pred,
+        labels=LABEL_ORDER,
+        target_names=CLASS_NAMES,
+        digits=4,
+        zero_division=0,
+        output_dict=True
     )
 
-    per_class_prec, per_class_rec, per_class_f1, per_class_sup = precision_recall_fscore_support(
-        y_true_zero, y_pred_zero, labels=np.arange(NUM_CLASSES), average=None, zero_division=0
-    )
-
-    per_class_df = pd.DataFrame({
-        "class_id_zero_based": np.arange(NUM_CLASSES),
-        "class_name": CLASS_NAMES,
-        "precision": per_class_prec,
-        "recall": per_class_rec,
-        "f1_score": per_class_f1,
-        "support": per_class_sup,
-    })
-
-    report = classification_report(
-        y_true_zero, y_pred_zero,
-        labels=np.arange(NUM_CLASSES),
+    report_txt = classification_report(
+        y_true,
+        y_pred,
+        labels=LABEL_ORDER,
         target_names=CLASS_NAMES,
         digits=4,
         zero_division=0
     )
 
-    metrics = {
-        "accuracy": float(acc),
-        "precision_weighted": float(prec_w),
-        "recall_weighted": float(rec_w),
-        "f1_weighted": float(f1_w),
-        "precision_macro": float(prec_m),
-        "recall_macro": float(rec_m),
-        "f1_macro": float(f1_m),
-        "balanced_accuracy": float(bal_acc),
-    }
+    per_class_rows = []
+    for cname in CLASS_NAMES:
+        per_class_rows.append({
+            "split": split_name,
+            "class_name": cname,
+            "precision": report_dict[cname]["precision"],
+            "recall": report_dict[cname]["recall"],
+            "f1_score": report_dict[cname]["f1-score"],
+            "support": report_dict[cname]["support"]
+        })
 
-    return metrics, per_class_df, report
+    per_class_df = pd.DataFrame(per_class_rows)
+    return overall, per_class_df, report_txt
 
 
-# =============================================================================
-# MODEL DEFINITIONS
-# =============================================================================
+def save_confusion_matrix(y_true, y_pred, save_path, title, normalize=None):
+    cm = confusion_matrix(y_true, y_pred, labels=LABEL_ORDER, normalize=normalize)
 
-class BasicBlock3D(nn.Module):
-    expansion = 1
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=CLASS_NAMES)
+    values_format = ".2f" if normalize is not None else "d"
+    disp.plot(ax=ax, cmap="Blues", values_format=values_format, xticks_rotation=45, colorbar=False)
 
-    def __init__(self, in_planes, planes, stride=1):
-        super().__init__()
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path,  bbox_inches="tight")
+    #plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
-        self.conv1 = nn.Conv3d(
-            in_planes, planes,
-            kernel_size=3, stride=stride, padding=1, bias=False
+
+def save_metrics_table_png(metrics_df, save_path, title):
+    df_show = metrics_df.copy().round(4)
+
+    fig, ax = plt.subplots(figsize=(12, 2 + 0.5 * len(df_show)))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=df_show.values,
+        colLabels=df_show.columns,
+        loc="center",
+        cellLoc="center"
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+
+    plt.title(title, pad=20)
+    plt.tight_layout()
+    #plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def get_model_scores(model, X):
+    """
+    Return class scores for ROC/AUC.
+    Prefer predict_proba; fall back to decision_function if needed.
+    Output shape: (n_samples, n_classes)
+    """
+    if hasattr(model, "predict_proba"):
+        y_score = model.predict_proba(X)
+    elif hasattr(model, "decision_function"):
+        y_score = model.decision_function(X)
+        if y_score.ndim == 1:
+            y_score = y_score[:, np.newaxis]
+    else:
+        y_score = None
+    return y_score
+
+
+def compute_multiclass_roc(y_true, y_score):
+    """
+    Compute one-vs-rest ROC curves and macro AUC.
+    """
+    if y_score is None:
+        return None, None, None, np.nan
+
+    y_true_bin = label_binarize(y_true, classes=LABEL_ORDER)
+
+    if y_score.shape[1] != len(LABEL_ORDER):
+        raise ValueError(
+            f"y_score has shape {y_score.shape}, expected second dimension = {len(LABEL_ORDER)}"
         )
-        self.bn1 = nn.BatchNorm3d(planes)
-        self.relu = nn.ReLU(inplace=True)
 
-        self.conv2 = nn.Conv3d(
-            planes, planes,
-            kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.bn2 = nn.BatchNorm3d(planes)
+    fpr = {}
+    tpr = {}
+    auc_per_class = {}
 
-        self.downsample = None
-        if stride != 1 or in_planes != planes:
-            self.downsample = nn.Sequential(
-                nn.Conv3d(in_planes, planes, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm3d(planes),
-            )
+    for i in range(len(CLASS_NAMES)):
+        fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], y_score[:, i])
+        auc_per_class[i] = roc_auc_score(y_true_bin[:, i], y_score[:, i])
 
-    def forward(self, x):
-        identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out += identity
-        out = self.relu(out)
-        return out
-
-
-class SmallResNet3D(nn.Module):
-    def __init__(self, num_classes=5, in_channels=1, base_channels=32, dropout=0.2):
-        super().__init__()
-
-        self.stem = nn.Sequential(
-            nn.Conv3d(in_channels, base_channels, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm3d(base_channels),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=3, stride=2, padding=1),
-        )
-
-        self.layer1 = self._make_layer(base_channels, base_channels, blocks=2, stride=1)
-        self.layer2 = self._make_layer(base_channels, base_channels * 2, blocks=2, stride=2)
-        self.layer3 = self._make_layer(base_channels * 2, base_channels * 4, blocks=2, stride=2)
-        self.layer4 = self._make_layer(base_channels * 4, base_channels * 8, blocks=2, stride=2)
-
-        self.pool = nn.AdaptiveAvgPool3d((1, 1, 1))
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(base_channels * 8, num_classes)
-
-        self._init_weights()
-
-    def _make_layer(self, in_planes, planes, blocks, stride):
-        layers = [BasicBlock3D(in_planes, planes, stride=stride)]
-        for _ in range(1, blocks):
-            layers.append(BasicBlock3D(planes, planes, stride=1))
-        return nn.Sequential(*layers)
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1.0)
-                nn.init.constant_(m.bias, 0.0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                nn.init.constant_(m.bias, 0.0)
-
-    def forward(self, x):
-        x = self.stem(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        x = self.pool(x)
-        x = torch.flatten(x, 1)
-        x = self.dropout(x)
-        x = self.fc(x)
-        return x
-
-def build_resnet3d_classifier(num_classes, dropout=0.2, base_channels=32):
-    return SmallResNet3D(
-        num_classes=num_classes,
-        in_channels=1,
-        base_channels=base_channels,
-        dropout=dropout
+    auc_macro = roc_auc_score(
+        y_true_bin,
+        y_score,
+        multi_class="ovr",
+        average="macro"
     )
 
-class Identity(nn.Module):
-    def forward(self, x):
-        return x
+    return fpr, tpr, auc_per_class, auc_macro
 
 
-class DINOBackboneWrapper(nn.Module):
+def save_roc_curves(y_true, y_score, save_path, title):
     """
-    Wraps your DINO model and extracts a feature tensor.
+    Save per-class ROC curves and return macro AUC.
     """
-    def __init__(self, backbone):
-        super().__init__()
-        self.backbone = backbone
+    fpr, tpr, auc_per_class, auc_macro = compute_multiclass_roc(y_true, y_score)
 
-    def forward(self, x):
-        out = self.backbone(x)
+    if fpr is None:
+        return np.nan
 
-        # common possibilities
-        if torch.is_tensor(out):
-            feats = out
-        elif isinstance(out, dict):
-            for key in ["x_norm_clstoken", "x_cls", "cls_token", "features", "embeddings", "x"]:
-                if key in out and torch.is_tensor(out[key]):
-                    feats = out[key]
-                    break
-            else:
-                raise TypeError(f"Could not find tensor features in DINO dict output keys: {list(out.keys())}")
-        elif isinstance(out, (list, tuple)):
-            tensor_candidates = [z for z in out if torch.is_tensor(z)]
-            if len(tensor_candidates) == 0:
-                raise TypeError("DINO returned list/tuple without tensor outputs.")
-            feats = tensor_candidates[0]
-        else:
-            raise TypeError(f"Unsupported DINO output type: {type(out)}")
-
-        if feats.ndim > 2:
-            feats = feats.flatten(start_dim=1)
-
-        return feats
-
-class DinoClassifier(nn.Module):
-    def __init__(self, backbone, num_classes, hidden_dim=512, dropout=0.2):
-        super().__init__()
-        self.feature_extractor = DINOBackboneWrapper(backbone)
-
-        if hasattr(backbone, "embed_dim"):
-            feat_dim = backbone.embed_dim
-        elif hasattr(backbone, "num_features"):
-            feat_dim = backbone.num_features
-        else:
-            raise AttributeError(
-                "Could not infer feature dimension from backbone. "
-                "Expected attribute 'embed_dim' or 'num_features'."
-            )
-
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
+    plt.figure(figsize=(8, 6))
+    for i, class_name in enumerate(CLASS_NAMES):
+        plt.plot(
+            fpr[i],
+            tpr[i],
+            label=f"{class_name} (AUC = {auc_per_class[i]:.2f})"
         )
 
-    def forward(self, x):
-        feats = self.feature_extractor(x)
-        logits = self.classifier(feats)
-        return logits
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(title + f"\nMacro AUC-ROC (OvR) = {auc_macro:.4f}")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    #plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
 
-class DinoClassifierOld(nn.Module):
-    def __init__(self, backbone, num_classes, hidden_dim=512, dropout=0.2):
-        super().__init__()
-        self.feature_extractor = DINOBackboneWrapper(backbone)
-
-        with torch.no_grad():
-            dummy = torch.zeros(1, 1, *target_DHW)
-            dummy_feats = self.feature_extractor(dummy)
-            feat_dim = dummy_feats.shape[1]
-
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
-        )
-
-    def forward(self, x):
-        feats = self.feature_extractor(x)
-        logits = self.classifier(feats)
-        return logits
+    return auc_macro
 
 
+def score_model_on_validation(model_name, params, X_train, y_train, X_val, y_val, random_state=42):
+    model = build_pipeline(model_name, params, random_state=random_state)
+    model.fit(X_train, y_train)
 
+    y_val_pred = model.predict(X_val)
 
-def load_dino_backbone(config_file, pretrained_weights):
-    # EXACTLY as requested
-    cfg = load_and_merge_config_3d(config_file)
-    model = build_model_for_eval(cfg, pretrained_weights)
-    model = model.to(DEVICE)
-    return model
+    acc = accuracy_score(y_val, y_val_pred)
+    f1_weighted = f1_score(y_val, y_val_pred, average="weighted", zero_division=0)
+    f1_macro = f1_score(y_val, y_val_pred, average="macro", zero_division=0)
+    bal_acc = balanced_accuracy_score(y_val, y_val_pred)
 
-
-def freeze_module(module):
-    for p in module.parameters():
-        p.requires_grad = False
-
-
-def unfreeze_module(module):
-    for p in module.parameters():
-        p.requires_grad = True
-
-
-def build_model(model_name, params):
-    if model_name == "dino_cls":
-        backbone = load_dino_backbone(config_file, pretrained_weights)
-        model = DinoClassifier(
-            backbone=backbone,
-            num_classes=NUM_CLASSES,
-            hidden_dim=params["hidden_dim"],
-            dropout=params["dropout"],
-        )
-
-        if params.get("freeze_backbone", False):
-            freeze_module(model.feature_extractor.backbone)
-        else:
-            unfreeze_module(model.feature_extractor.backbone)
-
-        return model
-
-    elif model_name == "resnet3d_18":
-        return build_resnet3d_classifier(
-            num_classes=NUM_CLASSES,
-            dropout=params.get("dropout", 0.2),
-            base_channels=params.get("base_channels", 32),
-        )
-
+    if hasattr(model, "predict_proba"):
+        y_val_proba = model.predict_proba(X_val)
+        ll = log_loss(y_val, y_val_proba, labels=LABEL_ORDER)
     else:
-        raise ValueError(f"Unknown model_name: {model_name}")
-
-
-# =============================================================================
-# TRAIN / EVAL
-# =============================================================================
-
-@torch.no_grad()
-def predict_loader(model, loader, device):
-    model.eval()
-
-    all_logits = []
-    all_probs = []
-    all_preds = []
-    all_true = []
-    all_paths = []
-
-    for x, y, paths in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        y0 = remap_tensor_labels(y, LABEL_ORDER)
-
-        with autocast(enabled=(device.type == "cuda")):
-            logits = model(x)
-
-        probs = torch.softmax(logits, dim=1)
-        preds = torch.argmax(probs, dim=1)
-
-        all_logits.append(logits.detach().cpu())
-        all_probs.append(probs.detach().cpu())
-        all_preds.append(preds.detach().cpu())
-        all_true.append(y0.detach().cpu())
-        all_paths.extend(list(paths))
-
-    return {
-        "logits": torch.cat(all_logits, dim=0).numpy(),
-        "probs": torch.cat(all_probs, dim=0).numpy(),
-        "preds": torch.cat(all_preds, dim=0).numpy(),
-        "true": torch.cat(all_true, dim=0).numpy(),
-        "paths": np.asarray(all_paths, dtype=str),
-    }
-
-
-def run_one_epoch_train(model, loader, optimizer, criterion, device, scaler=None):
-    model.train()
-
-    running_loss = 0.0
-    n_samples = 0
-
-    pbar = tqdm(loader, desc="Train", leave=False)
-
-    for x, y, _ in pbar:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        y0 = remap_tensor_labels(y, LABEL_ORDER)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        with autocast(enabled=(device.type == "cuda")):
-            logits = model(x)
-            loss = criterion(logits, y0)
-
-        if scaler is not None and device.type == "cuda":
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
-
-        batch_n = x.size(0)
-        running_loss += loss.item() * batch_n
-        n_samples += batch_n
-
-        pbar.set_postfix(loss=f"{running_loss / max(n_samples,1):.4f}")
-
-    return running_loss / max(n_samples, 1)
-
-
-@torch.no_grad()
-def evaluate_loader(model, loader, criterion, device):
-    model.eval()
-
-    running_loss = 0.0
-    n_samples = 0
-
-    all_probs = []
-    all_preds = []
-    all_true = []
-
-    for x, y, _ in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        y0 = remap_tensor_labels(y, LABEL_ORDER)
-
-        with autocast(enabled=(device.type == "cuda")):
-            logits = model(x)
-            loss = criterion(logits, y0)
-
-        probs = torch.softmax(logits, dim=1)
-        preds = torch.argmax(probs, dim=1)
-
-        batch_n = x.size(0)
-        running_loss += loss.item() * batch_n
-        n_samples += batch_n
-
-        all_probs.append(probs.detach().cpu().numpy())
-        all_preds.append(preds.detach().cpu().numpy())
-        all_true.append(y0.detach().cpu().numpy())
-
-    y_prob = np.concatenate(all_probs, axis=0)
-    y_pred = np.concatenate(all_preds, axis=0)
-    y_true = np.concatenate(all_true, axis=0)
-
-    metrics, per_class_df, report = compute_metrics(y_true, y_pred, prefix_name="Eval")
-
-    try:
-        ll = log_loss(y_true, y_prob, labels=np.arange(NUM_CLASSES))
-    except Exception:
         ll = np.nan
 
-    metrics["loss"] = float(running_loss / max(n_samples, 1))
-    metrics["log_loss"] = None if np.isnan(ll) else float(ll)
-
-    return metrics, per_class_df, report, y_true, y_pred, y_prob
-
-
-def count_trainable_params(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def fit_model_once(
-    model_name,
-    params,
-    train_dataset,
-    val_dataset,
-    fold_output_dir,
-    random_state=SEED,
-):
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=params["batch_size"],
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=(DEVICE.type == "cuda"),
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers=(num_workers > 0),
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=params["batch_size"],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(DEVICE.type == "cuda"),
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers=(num_workers > 0),
-    )
-
-    y_train = subset_labels(train_dataset)
-    class_weights = compute_class_weights(y_train, LABEL_ORDER).to(DEVICE)
-
-    model = build_model(model_name, params)
-
-    if DEVICE.type == "cuda" and torch.cuda.device_count() > 1:
-        print(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
-        model = nn.DataParallel(model)
-
-    model = model.to(DEVICE)
-
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-    optimizer_name = params["optimizer"]
-    lr = params["lr"]
-    weight_decay = params["weight_decay"]
-
-    if optimizer_name == "adamw":
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr,
-            weight_decay=weight_decay,
-        )
-    elif optimizer_name == "sgd":
-        optimizer = optim.SGD(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr,
-            momentum=0.9,
-            nesterov=True,
-            weight_decay=weight_decay,
-        )
-    else:
-        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
-
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=0.5,
-        patience=max(1, params["patience"] // 2),
-        #verbose=True
-    )
-
-    scaler = GradScaler("cuda", enabled=(DEVICE.type == "cuda"))
-
-    best_score = -np.inf
-    best_state = None
-    best_epoch = -1
-    epochs_no_improve = 0
-    history_rows = []
-
-    n_epochs = params["epochs"]
-    patience = params["patience"]
-
-    print(f"Trainable params: {count_trainable_params(model):,}")
-
-    for epoch in range(1, n_epochs + 1):
-        t0 = time.time()
-
-        train_loss = run_one_epoch_train(model, train_loader, optimizer, criterion, DEVICE, scaler=scaler)
-        val_metrics, _, _, _, _, _ = evaluate_loader(model, val_loader, criterion, DEVICE)
-
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_f1_weighted": val_metrics["f1_weighted"],
-            "val_f1_macro": val_metrics["f1_macro"],
-            "val_balanced_accuracy": val_metrics["balanced_accuracy"],
-            "val_log_loss": val_metrics["log_loss"],
-            "lr": optimizer.param_groups[0]["lr"],
-            "epoch_time_sec": time.time() - t0,
-        }
-        history_rows.append(row)
-
-        score_tuple = (
-            val_metrics["f1_macro"],
-            val_metrics["balanced_accuracy"],
-            -(val_metrics["log_loss"] if val_metrics["log_loss"] is not None else 1e9),
-        )
-
-        print(
-            f"[Epoch {epoch:03d}] "
-            f"train_loss={train_loss:.4f} | "
-            f"val_loss={val_metrics['loss']:.4f} | "
-            f"val_acc={val_metrics['accuracy']:.4f} | "
-            f"val_f1_macro={val_metrics['f1_macro']:.4f} | "
-            f"val_bal_acc={val_metrics['balanced_accuracy']:.4f}"
-        )
-
-        scheduler.step(val_metrics["f1_macro"])
-
-        if score_tuple > best_score if isinstance(best_score, tuple) else True:
-            best_score = score_tuple
-            best_epoch = epoch
-            epochs_no_improve = 0
-
-            state_dict = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-            best_state = copy.deepcopy(state_dict)
-        else:
-            epochs_no_improve += 1
-
-        if epochs_no_improve >= patience:
-            print(f"Early stopping at epoch {epoch} (best epoch: {best_epoch})")
-            break
-
-    history_df = pd.DataFrame(history_rows)
-    history_df.to_csv(Path(fold_output_dir) / "train_history.csv", index=False)
-
-    if best_state is None:
-        raise RuntimeError("Training failed: no best model state was captured.")
-
-    # reload best model
-    final_model = build_model(model_name, params)
-    final_model.load_state_dict(best_state)
-
-    if DEVICE.type == "cuda" and torch.cuda.device_count() > 1:
-        final_model = nn.DataParallel(final_model)
-
-    final_model = final_model.to(DEVICE)
-
-    val_metrics, val_per_class, val_report, y_val_true, y_val_pred, y_val_prob = evaluate_loader(
-        final_model, val_loader, criterion, DEVICE
-    )
-
-    return {
-        "model": final_model,
-        "best_epoch": best_epoch,
-        "history_df": history_df,
-        "val_metrics": val_metrics,
-        "val_per_class": val_per_class,
-        "val_report": val_report,
-        "y_val_true": y_val_true,
-        "y_val_pred": y_val_pred,
-        "y_val_prob": y_val_prob,
-    }
+    result = dict(params)
+    result.update({
+        "accuracy_val": acc,
+        "f1_weighted_val": f1_weighted,
+        "f1_macro_val": f1_macro,
+        "balanced_acc_val": bal_acc,
+        "log_loss_val": ll
+    })
+    return result
 
 
 def select_best_result(results_df):
@@ -859,380 +481,395 @@ def select_best_result(results_df):
     return best_row, df
 
 
-def run_hyperparameter_search(model_name, param_grid, train_dataset, val_dataset, fold_output_dir):
+def run_hyperparameter_search(model_name, param_grid, X_train, y_train, X_val, y_val, n_jobs=48, random_state=42):
     param_list = list(ParameterGrid(param_grid))
     print(f"Total hyperparameter combinations: {len(param_list)}")
 
-    search_rows = []
-    best_artifact = None
-    best_tuple = None
-
-    for i, params in enumerate(param_list, start=1):
-        print("\n" + "-" * 100)
-        print(f"[{i}/{len(param_list)}] Evaluating params:")
-        print(json.dumps(params, indent=2))
-
-        combo_dir = Path(fold_output_dir) / f"search_combo_{i:03d}"
-        ensure_dir(combo_dir)
-
-        fit_out = fit_model_once(
-            model_name=model_name,
-            params=params,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            fold_output_dir=combo_dir,
+    results = Parallel(n_jobs=n_jobs, backend="loky", verbose=VERBOSE_SEARCH)(
+        delayed(score_model_on_validation)(
+            model_name, params, X_train, y_train, X_val, y_val, random_state
         )
+        for params in param_list
+    )
 
-        val_metrics = fit_out["val_metrics"]
-
-        row = dict(params)
-        row.update({
-            "accuracy_val": val_metrics["accuracy"],
-            "f1_weighted_val": val_metrics["f1_weighted"],
-            "f1_macro_val": val_metrics["f1_macro"],
-            "balanced_acc_val": val_metrics["balanced_accuracy"],
-            "log_loss_val": np.nan if val_metrics["log_loss"] is None else val_metrics["log_loss"],
-            "best_epoch": fit_out["best_epoch"],
-        })
-        search_rows.append(row)
-
-        this_tuple = (
-            row["f1_macro_val"],
-            row["balanced_acc_val"],
-            -(row["log_loss_val"] if not np.isnan(row["log_loss_val"]) else 1e9),
-        )
-
-        if best_tuple is None or this_tuple > best_tuple:
-            best_tuple = this_tuple
-            best_artifact = fit_out
-
-        # free memory
-        del fit_out
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    results_df = pd.DataFrame(search_rows)
+    results_df = pd.DataFrame(results)
     best_row, sorted_df = select_best_result(results_df)
-
-    results_df.to_csv(Path(fold_output_dir) / "hyperparameter_search_results.csv", index=False)
-    sorted_df.to_csv(Path(fold_output_dir) / "hyperparameter_search_results_sorted.csv", index=False)
-
     return best_row, sorted_df
 
 
-def fit_final_model_and_evaluate(
+def fit_selected_model_and_evaluate(
     model_name,
     best_params,
-    train_dataset,
-    val_dataset,
-    test_dataset,
-    fold_output_dir,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    X_test,
+    y_test,
+    random_state=42,
+    save_diagnostic_train_val=True
 ):
-    trainval_dataset = ConcatDataset([train_dataset, val_dataset])
+    outputs = {}
 
-    trainval_loader = DataLoader(
-        trainval_dataset,
-        batch_size=best_params["batch_size"],
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=(DEVICE.type == "cuda"),
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers=(num_workers > 0),
-    )
+    # Diagnostic model: train only
+    if save_diagnostic_train_val:
+        diag_model = build_pipeline(model_name, best_params, random_state=random_state)
+        diag_model.fit(X_train, y_train)
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=best_params["batch_size"],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(DEVICE.type == "cuda"),
-        worker_init_fn=seed_worker,
-        generator=g,
-        persistent_workers=(num_workers > 0),
-    )
+        y_train_pred = diag_model.predict(X_train)
+        y_val_pred = diag_model.predict(X_val)
 
-    # collect trainval labels
-    y_train = subset_labels(train_dataset)
-    y_val = subset_labels(val_dataset)
+        y_train_score = get_model_scores(diag_model, X_train)
+        y_val_score = get_model_scores(diag_model, X_val)
+
+        train_metrics, train_per_class, train_report = compute_metrics(y_train, y_train_pred, "Train")
+        val_metrics, val_per_class, val_report = compute_metrics(y_val, y_val_pred, "Validation")
+
+        _, _, _, train_auc_macro = compute_multiclass_roc(y_train, y_train_score)
+        _, _, _, val_auc_macro = compute_multiclass_roc(y_val, y_val_score)
+
+        train_metrics["roc_auc_macro_ovr"] = train_auc_macro
+        val_metrics["roc_auc_macro_ovr"] = val_auc_macro
+
+        outputs["diagnostic_model"] = diag_model
+        outputs["train_metrics"] = train_metrics
+        outputs["val_metrics"] = val_metrics
+        outputs["train_per_class"] = train_per_class
+        outputs["val_per_class"] = val_per_class
+        outputs["train_report"] = train_report
+        outputs["val_report"] = val_report
+        outputs["y_train_pred"] = y_train_pred
+        outputs["y_val_pred"] = y_val_pred
+        outputs["y_train_score"] = y_train_score
+        outputs["y_val_score"] = y_val_score
+
+    # Final model: refit on train + val
+    X_trainval = np.concatenate([X_train, X_val], axis=0)
     y_trainval = np.concatenate([y_train, y_val], axis=0)
-    class_weights = compute_class_weights(y_trainval, LABEL_ORDER).to(DEVICE)
 
-    model = build_model(model_name, best_params)
+    final_model = build_pipeline(model_name, best_params, random_state=random_state)
+    final_model.fit(X_trainval, y_trainval)
 
-    if DEVICE.type == "cuda" and torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
+    y_test_pred = final_model.predict(X_test)
+    y_test_score = get_model_scores(final_model, X_test)
 
-    model = model.to(DEVICE)
+    test_metrics, test_per_class, test_report = compute_metrics(y_test, y_test_pred, "Test")
+    _, _, _, test_auc_macro = compute_multiclass_roc(y_test, y_test_score)
+    test_metrics["roc_auc_macro_ovr"] = test_auc_macro
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    outputs["final_model"] = final_model
+    outputs["best_model"] = final_model
+    outputs["test_metrics"] = test_metrics
+    outputs["test_per_class"] = test_per_class
+    outputs["test_report"] = test_report
+    outputs["y_test_pred"] = y_test_pred
+    outputs["y_test_true"] = y_test
+    outputs["y_test_score"] = y_test_score
 
-    if best_params["optimizer"] == "adamw":
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=best_params["lr"],
-            weight_decay=best_params["weight_decay"],
-        )
-    else:
-        optimizer = optim.SGD(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=best_params["lr"],
-            momentum=0.9,
-            nesterov=True,
-            weight_decay=best_params["weight_decay"],
-        )
-
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=0.5,
-        patience=max(1, best_params["patience"] // 2),
-       # verbose=True
-    )
-
-    scaler = GradScaler("cuda",enabled=(DEVICE.type == "cuda"))
-    best_state = None
-    best_score = None
-    best_epoch = -1
-    epochs_no_improve = 0
-
-    final_n_epochs = best_params["epochs"]
-    final_patience = best_params["patience"]
-
-    # small internal validation signal from trainval is not used here,
-    # so we monitor train loss only for LR and keep best on train loss proxy.
-    # Alternatively, one could keep the selected epoch from the first search.
-    best_train_loss = np.inf
-
-    history_rows = []
-
-    for epoch in range(1, final_n_epochs + 1):
-        train_loss = run_one_epoch_train(model, trainval_loader, optimizer, criterion, DEVICE, scaler=scaler)
-
-        row = {
-            "epoch": epoch,
-            "trainval_loss": train_loss,
-            "lr": optimizer.param_groups[0]["lr"],
-        }
-        history_rows.append(row)
-
-        scheduler.step(-train_loss)
-
-        if train_loss < best_train_loss:
-            best_train_loss = train_loss
-            best_epoch = epoch
-            epochs_no_improve = 0
-            state_dict = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-            best_state = copy.deepcopy(state_dict)
-        else:
-            epochs_no_improve += 1
-
-        print(f"[Final fit epoch {epoch:03d}] trainval_loss={train_loss:.4f}")
-
-        if epochs_no_improve >= final_patience:
-            print(f"Final fit early stop at epoch {epoch} (best epoch: {best_epoch})")
-            break
-
-    history_df = pd.DataFrame(history_rows)
-    history_df.to_csv(Path(fold_output_dir) / "final_trainval_history.csv", index=False)
-
-    if best_state is None:
-        raise RuntimeError("No best state for final model.")
-
-    final_model = build_model(model_name, best_params)
-    final_model.load_state_dict(best_state)
-
-    if DEVICE.type == "cuda" and torch.cuda.device_count() > 1:
-        final_model = nn.DataParallel(final_model)
-    final_model = final_model.to(DEVICE)
-
-    test_metrics, test_per_class, test_report, y_test_true, y_test_pred, y_test_prob = evaluate_loader(
-        final_model, test_loader, criterion, DEVICE
-    )
-
-    ckpt_path = Path(fold_output_dir) / "best_final_model.pt"
-    state_to_save = final_model.module.state_dict() if isinstance(final_model, nn.DataParallel) else final_model.state_dict()
-    torch.save(
-        {
-            "model_name": model_name,
-            "best_params": best_params,
-            "state_dict": state_to_save,
-            "label_order": LABEL_ORDER,
-            "class_names": CLASS_NAMES,
-        },
-        ckpt_path
-    )
-
-    return {
-        "final_model": final_model,
-        "test_metrics": test_metrics,
-        "test_per_class": test_per_class,
-        "test_report": test_report,
-        "y_test_true": y_test_true,
-        "y_test_pred": y_test_pred,
-        "y_test_prob": y_test_prob,
-        "checkpoint_path": str(ckpt_path),
-    }
+    return outputs
 
 
-# =============================================================================
-# PARAMETER GRIDS
-# =============================================================================
-
-PARAM_GRIDS = {
-    "dino_cls": {
-        "hidden_dim": [256, 512],
-        "dropout": [0.2, 0.4],
-        "freeze_backbone": [True, False],
-        "optimizer": ["adamw"],
-        "lr": [1e-4, 5e-4],
-        "weight_decay": [1e-4, 1e-3],
-        "batch_size": [batch_size],
-        "epochs": [100],
-        "patience": [5],
-    },
-    "resnet3d_18": {
-        "dropout": [0.2, 0.4],
-        "base_channels": [32],
-        "optimizer": ["adamw"],
-        "lr": [1e-4, 3e-4],
-        "weight_decay": [1e-4, 1e-3],
-        "batch_size": [batch_size],
-        "epochs": [100],
-        "patience": [5],
-    },
-}
-
-
-
-# =============================================================================
+# ============================================================
 # PER-FOLD PROCESSING
-# =============================================================================
+# ============================================================
 
-def process_single_fold(test_fold_dir, all_fold_dirs, output_root, model_name):
-    fold_name = test_fold_dir.name
+def process_single_fold(npz_path, output_root, model_name, param_grid, random_state=42):
+    npz_path = Path(npz_path)
+    fold_name = npz_path.stem
+
     fold_output_dir = Path(output_root) / model_name / fold_name
     ensure_dir(fold_output_dir)
 
     print("\n" + "=" * 100)
     print(f"Processing fold: {fold_name}")
+    print(f"File: {npz_path.name}")
     print(f"Model: {model_name}")
     print("=" * 100)
 
-    train_fold_dirs = [p for p in all_fold_dirs if p != test_fold_dir]
+    data = np.load(npz_path, allow_pickle=True)
 
-    trainval_dataset_full = build_dataset_for_folders(train_fold_dirs, do_aug=False)
-    train_dataset_full_aug = build_dataset_for_folders(train_fold_dirs, do_aug=True)
-    test_dataset = build_dataset_for_folders([test_fold_dir], do_aug=False)
+    X_train = data["X_train"]
+    y_train = data["y_train"]
+    X_val = data["X_val"]
+    y_val = data["y_val"]
+    X_test = data["X_test"]
+    y_test = data["y_test"]
 
-    # split on the non-augmented version, then map indices onto augmented version
-    train_subset_plain, val_subset_plain = make_train_val_subsets(
-        trainval_dataset_full, val_fraction=0.15, random_state=SEED
-    )
+    print("Shapes:")
+    print("X_train:", X_train.shape, "y_train:", y_train.shape)
+    print("X_val  :", X_val.shape, "y_val  :", y_val.shape)
+    print("X_test :", X_test.shape, "y_test :", y_test.shape)
 
-    train_indices = train_subset_plain.indices
-    val_indices = val_subset_plain.indices
+    print("Classes in train:", np.unique(y_train))
+    print("Classes in val  :", np.unique(y_val))
+    print("Classes in test :", np.unique(y_test))
 
-    train_dataset = Subset(train_dataset_full_aug, train_indices)
-    val_dataset = Subset(trainval_dataset_full, val_indices)
+    print_class_counts(y_train, "Train")
+    print_class_counts(y_val, "Validation")
+    print_class_counts(y_test, "Test")
 
-    best_row, results_df_sorted = run_hyperparameter_search(
+    param_grid_local = filter_valid_pca_components(param_grid, X_train)
+
+    # Hyperparameter search
+    best_row, results_df = run_hyperparameter_search(
         model_name=model_name,
-        param_grid=PARAM_GRIDS[model_name],
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        fold_output_dir=fold_output_dir,
+        param_grid=param_grid_local,
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        n_jobs=N_JOBS_SEARCH,
+        random_state=random_state
     )
 
-    with open(Path(fold_output_dir) / "best_validation_result.json", "w", encoding="utf-8") as f:
-        json.dump(best_row, f, indent=2)
+    best_params = serialize_best_params(best_row)
 
-    best_params = {}
-    for k, v in best_row.items():
-        if k in PARAM_GRIDS[model_name]:
-            best_params[k] = v
+    print("\nBest hyperparameters:")
+    print(json.dumps(best_params, indent=2, default=str))
 
-    eval_out = fit_final_model_and_evaluate(
+    print("\nBest hyperparameters with types:")
+    for k, v in best_params.items():
+        print(f"{k}: {v} ({type(v)})")
+
+    print(f"Best validation macro F1: {best_row['f1_macro_val']:.6f}")
+    print(f"Best validation balanced accuracy: {best_row['balanced_acc_val']:.6f}")
+    print(f"Best validation log-loss: {best_row['log_loss_val']}")
+
+    # Save search results
+    results_csv_path = fold_output_dir / "hyperparameter_search_results.csv"
+    best_params_json_path = fold_output_dir / "best_params.json"
+    final_model_path = fold_output_dir / "final_model.joblib"
+    best_model_path = fold_output_dir / "best_model_trainval.joblib"
+    metrics_csv_path = fold_output_dir / "metrics_summary.csv"
+    per_class_csv_path = fold_output_dir / "per_class_metrics.csv"
+    reports_txt_path = fold_output_dir / "classification_reports.txt"
+    metrics_png_path = fold_output_dir / "metrics_summary.svg"
+
+    cm_train_raw_path = fold_output_dir / "cm_train_raw.svg"
+    cm_train_norm_path = fold_output_dir / "cm_train_normalized.svg"
+    cm_val_raw_path = fold_output_dir / "cm_val_raw.svg"
+    cm_val_norm_path = fold_output_dir / "cm_val_normalized.svg"
+    cm_test_raw_path = fold_output_dir / "cm_test_raw.svg"
+    cm_test_norm_path = fold_output_dir / "cm_test_normalized.svg"
+
+    roc_train_path = fold_output_dir / "roc_train_ovr.svg"
+    roc_val_path = fold_output_dir / "roc_val_ovr.svg"
+    roc_test_path = fold_output_dir / "roc_test_ovr.svg"
+
+    results_df.to_csv(results_csv_path, index=False)
+
+    with open(best_params_json_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "fold_name": fold_name,
+            "file_name": npz_path.name,
+            "model_name": model_name,
+            "best_params": best_params,
+            "best_validation_metrics": {
+                "accuracy_val": float(best_row["accuracy_val"]),
+                "f1_weighted_val": float(best_row["f1_weighted_val"]),
+                "f1_macro_val": float(best_row["f1_macro_val"]),
+                "balanced_acc_val": float(best_row["balanced_acc_val"]),
+                "log_loss_val": None if pd.isna(best_row["log_loss_val"]) else float(best_row["log_loss_val"]),
+            }
+        }, f, indent=2, ensure_ascii=False, default=str)
+
+    # Fit selected model and evaluate
+    eval_out = fit_selected_model_and_evaluate(
         model_name=model_name,
         best_params=best_params,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        test_dataset=test_dataset,
-        fold_output_dir=fold_output_dir,
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        X_test=X_test,
+        y_test=y_test,
+        random_state=random_state,
+        save_diagnostic_train_val=SAVE_DIAGNOSTIC_TRAIN_VAL
     )
 
-    # Save reports / confusion matrices
-    test_metrics = eval_out["test_metrics"]
-    test_per_class = eval_out["test_per_class"]
-    test_report = eval_out["test_report"]
+    metrics_rows = []
+    per_class_parts = []
+    report_blocks = []
 
-    test_per_class.to_csv(Path(fold_output_dir) / "test_per_class.csv", index=False)
+    if SAVE_DIAGNOSTIC_TRAIN_VAL:
+        metrics_rows.append(eval_out["train_metrics"])
+        metrics_rows.append(eval_out["val_metrics"])
+        per_class_parts.append(eval_out["train_per_class"])
+        per_class_parts.append(eval_out["val_per_class"])
 
-    with open(Path(fold_output_dir) / "test_classification_report.txt", "w", encoding="utf-8") as f:
-        f.write(test_report)
-        f.write("\n")
+        report_blocks.append("CLASSIFICATION REPORT - TRAIN\n" + "-" * 80 + "\n" + eval_out["train_report"])
+        report_blocks.append("CLASSIFICATION REPORT - VALIDATION\n" + "-" * 80 + "\n" + eval_out["val_report"])
+
+        save_confusion_matrix(
+            y_train, eval_out["y_train_pred"],
+            cm_train_raw_path,
+            f"{fold_name} - Train (raw)",
+            normalize=None
+        )
+        save_confusion_matrix(
+            y_train, eval_out["y_train_pred"],
+            cm_train_norm_path,
+            f"{fold_name} - Train (normalized)",
+            normalize="true"
+        )
+        save_confusion_matrix(
+            y_val, eval_out["y_val_pred"],
+            cm_val_raw_path,
+            f"{fold_name} - Validation (raw)",
+            normalize=None
+        )
+        save_confusion_matrix(
+            y_val, eval_out["y_val_pred"],
+            cm_val_norm_path,
+            f"{fold_name} - Validation (normalized)",
+            normalize="true"
+        )
+
+        if eval_out["y_train_score"] is not None:
+            save_roc_curves(
+                y_train,
+                eval_out["y_train_score"],
+                roc_train_path,
+                f"{fold_name} - Train ROC Curves ({model_name})"
+            )
+
+        if eval_out["y_val_score"] is not None:
+            save_roc_curves(
+                y_val,
+                eval_out["y_val_score"],
+                roc_val_path,
+                f"{fold_name} - Validation ROC Curves ({model_name})"
+            )
+
+    metrics_rows.append(eval_out["test_metrics"])
+    per_class_parts.append(eval_out["test_per_class"])
+    report_blocks.append("CLASSIFICATION REPORT - TEST\n" + "-" * 80 + "\n" + eval_out["test_report"])
 
     save_confusion_matrix(
-        eval_out["y_test_true"], eval_out["y_test_pred"],
-        Path(fold_output_dir) / "test_confusion_matrix_raw.svg",
-        f"Test Confusion Matrix - {model_name} - {fold_name}",
-        normalize=None,
-        class_names=CLASS_NAMES
+        y_test, eval_out["y_test_pred"],
+        cm_test_raw_path,
+        f"{fold_name} - Test (raw)",
+        normalize=None
     )
     save_confusion_matrix(
-        eval_out["y_test_true"], eval_out["y_test_pred"],
-        Path(fold_output_dir) / "test_confusion_matrix_normalized.svg",
-        f"Test Confusion Matrix - {model_name} - {fold_name} (normalized)",
-        normalize="true",
-        class_names=CLASS_NAMES
+        y_test, eval_out["y_test_pred"],
+        cm_test_norm_path,
+        f"{fold_name} - Test (normalized)",
+        normalize="true"
     )
 
+    if eval_out["y_test_score"] is not None:
+        save_roc_curves(
+            y_test,
+            eval_out["y_test_score"],
+            roc_test_path,
+            f"{fold_name} - Test ROC Curves ({model_name})"
+        )
+
+    metrics_df = pd.DataFrame(metrics_rows)
+    per_class_df = pd.concat(per_class_parts, ignore_index=True)
+
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    per_class_df.to_csv(per_class_csv_path, index=False)
+
+    save_metrics_table_png(
+        metrics_df,
+        metrics_png_path,
+        f"Metrics Summary - {model_name} - {fold_name}"
+    )
+
+    with open(reports_txt_path, "w", encoding="utf-8") as f:
+        f.write(f"Fold: {fold_name}\n")
+        f.write(f"File: {npz_path.name}\n")
+        f.write(f"Model: {model_name}\n")
+        f.write("=" * 100 + "\n\n")
+
+        f.write("Shapes\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"X_train: {X_train.shape} | y_train: {y_train.shape}\n")
+        f.write(f"X_val:   {X_val.shape} | y_val:   {y_val.shape}\n")
+        f.write(f"X_test:  {X_test.shape} | y_test:  {y_test.shape}\n\n")
+
+        f.write("Best parameters\n")
+        f.write("-" * 80 + "\n")
+        f.write(json.dumps(best_params, indent=2, ensure_ascii=False, default=str))
+        f.write("\n\n")
+
+        f.write("Best validation metrics\n")
+        f.write("-" * 80 + "\n")
+        f.write(json.dumps({
+            "accuracy_val": float(best_row["accuracy_val"]),
+            "f1_weighted_val": float(best_row["f1_weighted_val"]),
+            "f1_macro_val": float(best_row["f1_macro_val"]),
+            "balanced_acc_val": float(best_row["balanced_acc_val"]),
+            "log_loss_val": None if pd.isna(best_row["log_loss_val"]) else float(best_row["log_loss_val"]),
+        }, indent=2, ensure_ascii=False))
+        f.write("\n\n")
+
+        f.write("Metrics summary\n")
+        f.write("-" * 80 + "\n")
+        f.write(metrics_df.to_string(index=False))
+        f.write("\n\n")
+
+        f.write("Per-class metrics\n")
+        f.write("-" * 80 + "\n")
+        f.write(per_class_df.to_string(index=False))
+        f.write("\n\n")
+
+        for block in report_blocks:
+            f.write(block)
+            f.write("\n\n")
+
+    joblib.dump(eval_out["final_model"], final_model_path)
+    joblib.dump(eval_out["best_model"], best_model_path)
+
+    # Fold-level summary row
     fold_summary = {
         "fold_name": fold_name,
+        "file_name": npz_path.name,
         "model_name": model_name,
         "best_accuracy_val": float(best_row["accuracy_val"]),
         "best_f1_weighted_val": float(best_row["f1_weighted_val"]),
         "best_f1_macro_val": float(best_row["f1_macro_val"]),
         "best_balanced_acc_val": float(best_row["balanced_acc_val"]),
         "best_log_loss_val": None if pd.isna(best_row["log_loss_val"]) else float(best_row["log_loss_val"]),
-        "test_accuracy": float(test_metrics["accuracy"]),
-        "test_precision_weighted": float(test_metrics["precision_weighted"]),
-        "test_recall_weighted": float(test_metrics["recall_weighted"]),
-        "test_f1_weighted": float(test_metrics["f1_weighted"]),
-        "test_precision_macro": float(test_metrics["precision_macro"]),
-        "test_recall_macro": float(test_metrics["recall_macro"]),
-        "test_f1_macro": float(test_metrics["f1_macro"]),
-        "test_balanced_accuracy": float(test_metrics["balanced_accuracy"]),
-        "checkpoint_path": eval_out["checkpoint_path"],
-        "output_dir": str(fold_output_dir),
+        "test_accuracy": float(eval_out["test_metrics"]["accuracy"]),
+        "test_precision_weighted": float(eval_out["test_metrics"]["precision_weighted"]),
+        "test_recall_weighted": float(eval_out["test_metrics"]["recall_weighted"]),
+        "test_f1_weighted": float(eval_out["test_metrics"]["f1_weighted"]),
+        "test_precision_macro": float(eval_out["test_metrics"]["precision_macro"]),
+        "test_recall_macro": float(eval_out["test_metrics"]["recall_macro"]),
+        "test_f1_macro": float(eval_out["test_metrics"]["f1_macro"]),
+        "test_balanced_accuracy": float(eval_out["test_metrics"]["balanced_accuracy"]),
+        "test_roc_auc_macro_ovr": None if pd.isna(eval_out["test_metrics"]["roc_auc_macro_ovr"]) else float(eval_out["test_metrics"]["roc_auc_macro_ovr"]),
+        "output_dir": str(fold_output_dir)
     }
-
-    with open(Path(fold_output_dir) / "fold_summary.json", "w", encoding="utf-8") as f:
-        json.dump(fold_summary, f, indent=2)
 
     print("\nSaved fold results to:", fold_output_dir)
 
     return {
         "fold_summary": fold_summary,
-        "test_per_class_df": test_per_class.assign(fold_name=fold_name),
+        "test_per_class_df": eval_out["test_per_class"].assign(fold_name=fold_name),
         "y_test_true": eval_out["y_test_true"],
         "y_test_pred": eval_out["y_test_pred"],
+        "y_test_score": eval_out["y_test_score"]
     }
 
 
-# =============================================================================
+# ============================================================
 # CROSS-VALIDATION AGGREGATION
-# =============================================================================
+# ============================================================
 
 def aggregate_cv_results(fold_outputs, output_root, model_name):
     model_output_dir = Path(output_root) / model_name
     ensure_dir(model_output_dir)
 
+    # Fold summaries
     fold_summary_df = pd.DataFrame([fo["fold_summary"] for fo in fold_outputs])
     fold_summary_csv = model_output_dir / "cross_validation_fold_results.csv"
     fold_summary_df.to_csv(fold_summary_csv, index=False)
 
+    # Aggregate overall metrics across folds
     metric_cols = [
         "test_accuracy",
         "test_precision_weighted",
@@ -1241,7 +878,8 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
         "test_precision_macro",
         "test_recall_macro",
         "test_f1_macro",
-        "test_balanced_accuracy"
+        "test_balanced_accuracy",
+        "test_roc_auc_macro_ovr"
     ]
 
     agg_rows = []
@@ -1253,14 +891,16 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
             "std": np.std(values, ddof=1) if len(values) > 1 else 0.0,
             "min": np.min(values),
             "max": np.max(values),
-            "n_folds": len(values),
+            "n_folds": len(values)
         })
 
     aggregate_metrics_df = pd.DataFrame(agg_rows)
     aggregate_metrics_csv = model_output_dir / "cross_validation_aggregate_metrics.csv"
     aggregate_metrics_df.to_csv(aggregate_metrics_csv, index=False)
 
+    # Per-class summary across folds
     per_class_all = pd.concat([fo["test_per_class_df"] for fo in fold_outputs], ignore_index=True)
+
     per_class_summary = (
         per_class_all
         .groupby("class_name")[["precision", "recall", "f1_score", "support"]]
@@ -1275,13 +915,14 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
     per_class_all.to_csv(per_class_all_csv, index=False)
     per_class_summary.to_csv(per_class_summary_csv, index=False)
 
+    # Pooled test predictions across folds
     y_test_all = np.concatenate([fo["y_test_true"] for fo in fold_outputs], axis=0)
     y_pred_all = np.concatenate([fo["y_test_pred"] for fo in fold_outputs], axis=0)
 
     pooled_report_txt = classification_report(
         y_test_all,
         y_pred_all,
-        labels=np.arange(NUM_CLASSES),
+        labels=LABEL_ORDER,
         target_names=CLASS_NAMES,
         digits=4,
         zero_division=0
@@ -1301,17 +942,31 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
         y_test_all, y_pred_all,
         pooled_cm_raw,
         f"Pooled Test Confusion Matrix - {model_name} (raw)",
-        normalize=None,
-        class_names=CLASS_NAMES
+        normalize=None
     )
     save_confusion_matrix(
         y_test_all, y_pred_all,
         pooled_cm_norm,
         f"Pooled Test Confusion Matrix - {model_name} (normalized)",
-        normalize="true",
-        class_names=CLASS_NAMES
+        normalize="true"
     )
 
+    # Pooled ROC across folds
+    y_score_all = None
+    if all(fo["y_test_score"] is not None for fo in fold_outputs):
+        y_score_all = np.concatenate([fo["y_test_score"] for fo in fold_outputs], axis=0)
+
+    pooled_roc_path = model_output_dir / "pooled_test_roc_ovr.svg"
+    pooled_auc_macro = np.nan
+    if y_score_all is not None:
+        pooled_auc_macro = save_roc_curves(
+            y_test_all,
+            y_score_all,
+            pooled_roc_path,
+            f"Pooled Test ROC Curves - {model_name}"
+        )
+
+    # Compact text summary
     summary_txt = model_output_dir / "cross_validation_summary.txt"
     with open(summary_txt, "w", encoding="utf-8") as f:
         f.write(f"Cross-validation summary for model: {model_name}\n")
@@ -1331,7 +986,12 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
         f.write("Pooled test classification report\n")
         f.write("-" * 80 + "\n")
         f.write(pooled_report_txt)
-        f.write("\n")
+        f.write("\n\n")
+
+        if not pd.isna(pooled_auc_macro):
+            f.write("Pooled ROC-AUC macro OvR\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{pooled_auc_macro:.6f}\n")
 
     print("\n" + "=" * 100)
     print(f"Cross-validation finished for model: {model_name}")
@@ -1343,73 +1003,58 @@ def aggregate_cv_results(fold_outputs, output_root, model_name):
     print(pooled_report_file)
     print(pooled_cm_raw)
     print(pooled_cm_norm)
+    if y_score_all is not None:
+        print(pooled_roc_path)
     print(summary_txt)
     print("=" * 100)
 
     return {
         "fold_summary_df": fold_summary_df,
         "aggregate_metrics_df": aggregate_metrics_df,
-        "per_class_summary_df": per_class_summary,
+        "per_class_summary_df": per_class_summary
     }
 
 
-# =============================================================================
+# ============================================================
 # MAIN RUNNER
-# =============================================================================
+# ============================================================
 
-def run_cross_validation_benchmark(patches_dir, output_root, model_name):
-    all_fold_dirs = collect_fold_dirs(Path(patches_dir))
+def run_cross_validation_benchmark(input_dir, output_root, model_name, random_state=42):
+    input_dir = Path(input_dir)
+    npz_files = sorted(input_dir.glob("*.npz"))
+
+    if len(npz_files) == 0:
+        raise FileNotFoundError(f"No .npz files found in {input_dir}")
+
     ensure_dir(Path(output_root) / model_name)
 
     print("\nFound folds:")
-    for f in all_fold_dirs:
+    for f in npz_files:
         print(" -", f.name)
 
     fold_outputs = []
-    for test_fold_dir in all_fold_dirs:
+    for npz_path in npz_files:
         fold_out = process_single_fold(
-            test_fold_dir=test_fold_dir,
-            all_fold_dirs=all_fold_dirs,
+            npz_path=npz_path,
             output_root=output_root,
             model_name=model_name,
+            param_grid=PARAM_GRIDS[model_name],
+            random_state=random_state
         )
         fold_outputs.append(fold_out)
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     return aggregate_cv_results(
         fold_outputs=fold_outputs,
         output_root=output_root,
-        model_name=model_name,
+        model_name=model_name
     )
 
-
-# =============================================================================
-# ENTRYPOINT
-# =============================================================================
 
 if __name__ == "__main__":
-    seed_everything(SEED)
-    ensure_dir(output_root)
-
-    print(f"Device: {DEVICE}")
-    if DEVICE.type == "cuda":
-        print(f"CUDA device count: {torch.cuda.device_count()}")
-        for i in range(torch.cuda.device_count()):
-            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
-
-    # Run DINO + head
-    #run_cross_validation_benchmark(
-    #    patches_dir=patches_dir,
-    #    output_root=output_root,
-    #    model_name="dino_cls"
-    #)
-
-    # Run ResNet3D baseline
-    run_cross_validation_benchmark(
-        patches_dir=patches_dir,
-        output_root=output_root,
-        model_name="resnet3d_18"
-    )
+    for model_name in MODEL_NAMES:
+        run_cross_validation_benchmark(
+            input_dir=INPUT_DIR,
+            output_root=OUTPUT_ROOT,
+            model_name=model_name,
+            random_state=RANDOM_STATE
+        )
