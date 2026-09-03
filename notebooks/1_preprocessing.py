@@ -371,8 +371,8 @@ def normalize_by_percentile(image, pmin=5, pmax=99.999, dtype=np.float32):
 
 
 
-input_dir = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/")
-out_dir = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/patches/")
+input_dir = Path(".../Nuclei3DClassification/data/")
+out_dir = Path("/.../Nuclei3DClassification/data/patches/")
 out_dir.mkdir(parents=True, exist_ok=True)
 
 image_dir = input_dir / "image"
@@ -425,6 +425,10 @@ for i in range(len(dataset)):
     )
 
 print("\nAll patches generated successfully.")
+
+
+
+
 
 
 
