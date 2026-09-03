@@ -61,10 +61,10 @@ import time
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
-AUG_DIR = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/embedding_aug_2000")   #_aug_500
-TEST_DIR = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/embedding")
-OUT_DIR = Path("/medicina/hmorales/projects/Nuclei3DClassification/data/embedding_2000_cv")  #_500_cv
-TRAIN_SUFFIX = "_2000_samples_aug"
+AUG_DIR = Path(".../Nuclei3DClassification/data/embedding_opt_4000")   #_aug_500
+TEST_DIR = Path(".../Nuclei3DClassification/data/embedding")
+OUT_DIR = Path(".../Nuclei3DClassification/data/embedding_4000_cv")  #_500_cv
+TRAIN_SUFFIX = "_20000_samples_aug_4000_samples_opt" #"_4000_samples_aug"
 
 RANDOM_STATE = 42
 VAL_FRACTION = 0.10
