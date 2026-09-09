@@ -17,9 +17,7 @@ The workflow includes nuclear patch extraction, training augmentation, feature e
 - [Input data and paths](#input-data-and-paths)
 - [Running the pipeline](#running-the-pipeline)
 - [Run the complete workflow](#run-the-complete-workflow)
-- [Continue from stage 4](#continue-from-stage-4)
-- [Classical parallelism and resource use](#classical-parallelism-and-resource-use)
-- [Resume classical selection](#resume-classical-selection)
+- [Continue from stage X](#continue-from-stage-x)
 - [Preprocessing and features](#preprocessing-and-features)
 - [Figures and tables](#figures-and-tables)
 - [Running jobs in the background](#running-jobs-in-the-background)
@@ -189,89 +187,66 @@ Preview commands with `bash run_pipeline.sh --dry-run`. The runner has nine comm
 | 8 | Script 6: statistics |
 | 9 | Script 7: representations |
 
-If preprocessing and feature extraction have already completed, add `--start-at 3` to continue with CV assembly. `--stop-after N` ends after a specified stage. These options require complete prerequisite outputs. Classical selection additionally supports candidate-level resume with `--resume-classical`; other stages do not gain resume support from this option. Completed compatible outputs can be kept at their existing path by passing `--results` explicitly. See `bash run_pipeline.sh --help` for options.
+### Runner options
 
-## Continue from stage 4
-
-When `preprocessed/`, `features/` and `cv/` are complete, keep the same `RUN` directory and skip stages 1–3. From the repository root, after activating the environment and defining `DATA` and `RUN`:
-
-```bash
-nohup bash run_pipeline.sh \
-  --data "$DATA" --results "$RUN" \
-  --start-at 4 --stop-after 9 \
-  --classical-jobs 8 --classical-threads 1 \
-  --workers 8 --cnn-batch 256 --data-parallel \
-  > "$RUN/pipeline_from4.log" 2>&1 < /dev/null &
-echo $! > "$RUN/pipeline_from4.pid"
-```
-
-This runs classical selection, CNN selection, both evaluations, statistics and representation analysis in sequence. Use a new or empty `classical/` directory for a fresh search; see [Resume classical selection](#resume-classical-selection) for an interrupted search. Later stages must also satisfy their existing output-directory requirements.
-
-```bash
-tail -f "$RUN/pipeline_from4.log"
-```
-
-The runner does not wait for or reserve a free GPU. GPU stages require available resources, and the runner performs a CUDA availability check before executing a stage range that includes them. To run classical selection alone while GPU work is deferred, use `--start-at 4 --stop-after 4`. After it completes and GPU resources are available, continue with `--start-at 5 --stop-after 9` and the same data, results and CNN settings. On a managed cluster, request resources through the local scheduler.
-
-## Classical parallelism and resource use
-
-Classical selection parallelizes independent **feature-family / fold / augmentation-level / classifier** searches on one host. Large SVM augmentation levels are scheduled first across folds. Each worker processes its hyperparameter candidates in their original order; the final selection uses the original ordering for exact ties, regardless of execution order.
-
-| Runner option | Default | Effect |
+| Option | Default | Purpose |
 |---|---|---|
-| `--classical-jobs N` | `1` | Number of concurrent classical condition searches |
-| `--classical-threads N` | `1` | BLAS/OpenMP thread limit inside each classical worker |
-| `--classical-cache DIR` | Within `classical/.preprocessing_cache/` | Location for temporary fitted preprocessing and transformed training arrays |
-| `--resume-classical` | Off | Resume a compatible classical search or verify a completed selection |
-| `--workers N` | `8` | Feature-extraction and CNN data-loading workers; independent of classical search parallelism |
+| `--start-at N` | `1` | First runner stage to execute |
+| `--stop-after N` | `9` | Last runner stage to execute |
+| `--workers N` | `8` | Feature-extraction and CNN data-loading workers |
+| `--embedding-batch N` | `16` | Batch size for frozen 3DINO inference |
+| `--cnn-batch N` | `256` | CNN training batch size |
+| `--data-parallel` | Off | Use multiple visible GPUs for CNN training |
+| `--classical-jobs N` | `1` | Concurrent classical model searches on one host |
+| `--classical-threads N` | `1` | BLAS/OpenMP threads allowed per classical worker |
+| `--classical-cache DIR` | Within `classical/.preprocessing_cache/` | Temporary preprocessing-cache location |
+| `--resume-classical` | Off | Resume compatible classical-selection checkpoints |
+| `--dry-run` | Off | Print commands without executing stages |
 
-The examples explicitly request **eight searches with one numerical thread each**. Defaults remain one search and one thread when these options are omitted. Keep `--classical-threads 1` initially: increasing it can help numerical operations such as PCA but does not make an individual SVM fit multithreaded. Eight jobs with four threads permit up to 32 numerical threads and are not necessarily faster than eight single-threaded jobs.
+See `bash run_pipeline.sh --help` for all options. The examples request eight classical searches with one numerical thread each. `--classical-jobs` parallelizes independent fold/model/augmentation conditions; `--classical-threads` controls numerical operations inside each worker and does not make an individual SVM fit multithreaded. `--workers` controls a separate extraction/loading process pool.
 
-For a server with 48 CPU cores, increase `--classical-jobs` only after checking RAM, swap activity and cache-disk use. Each worker loads its own condition and creates additional arrays for preprocessing and fitting. An 80,000 × 1,024 float32 matrix alone occupies 312.5 MiB; total worker memory is substantially larger. There is no automatic RAM or disk-space budget. The requested jobs × threads must not exceed the CPU count available to the process as reported by joblib, which may be smaller than the physical server under a scheduler or container quota. This implementation does not distribute work across separate cluster nodes.
+Choose parallelism to fit the available CPUs, RAM and disk space. Jobs × threads must not exceed the CPU allocation visible to the process. Each classical worker loads its own condition, and temporary preprocessing caches can require several GB per worker. A fast local disk can be selected with `--classical-cache DIR`. Caches are removed after each condition completes and are not needed to evaluate saved models. Parallel execution preserves the model-selection rules and tie-breaking order.
 
-```bash
-nproc
-free -h
-df -h "$RUN"
-```
+The runner does not wait for or reserve a free GPU. Ensure GPU resources are available for the requested stages; on managed clusters, use the local scheduler. Classical search parallelism uses CPUs on one host and does not distribute work across cluster nodes.
 
-Repeated training-fitted scaler/PCA calculations are cached within each condition. SVM calibration keeps separate training subsets and preprocessing fits for its identity-isolated internal folds. Hyperparameter grids, PCA solver, calibration, validation selection and training data remain unchanged. Classifiers themselves are still fitted separately for every candidate.
+## Continue from stage X
 
-Temporary caches can occupy several GB per worker. Prefer a fast local SSD with sufficient space; for example, add `--classical-cache /path/to/local/scratch/nuclei_cache`. Caches are removed for each successfully completed condition, and saved models remain usable without them. Avoid RAM-backed cache directories unless their memory use is explicitly budgeted. Cache files contain training representations and should use the same access restrictions as the input data.
+If execution stops, inspect the log to identify the last successfully completed stage. Keep the same results directory and restart at the first stage that still needs to run, using `--start-at N`. The value refers to the **runner stage table above**, not the Python script number. Use `--stop-after N` to end at an intermediate stage.
 
-For direct invocation of `scripts/4_run_models.py`, the corresponding options are `--jobs`, `--threads-per-job`, `--cache-dir` and `--resume`. Direct invocation additionally supports `--no-cache`. These settings affect classical selection, not CNN training or evaluation parallelism.
-
-## Resume classical selection
-
-The selector checkpoints after every completed candidate. Each checkpoint contains the completed search prefix and the best model so far. A candidate interrupted during fitting must run again; previously checkpointed candidates and completed conditions are reused. `START` and `DONE` log messages report candidate progress, elapsed time and validation macro-F1.
-
-To resume an interrupted stage 4 and then run stages 5–9, use:
+After activating the environment and restoring the path variables, adapt this command:
 
 ```bash
+START_STAGE=4  # Example: stages 1–3 have completed successfully.
+
 nohup bash run_pipeline.sh \
   --data "$DATA" --results "$RUN" \
-  --start-at 4 --stop-after 9 --resume-classical \
+  --dino-repo "$DINO_REPO" --dino-config "$DINO_CONFIG" \
+  --dino-weights "$DINO_WEIGHTS" \
+  --start-at "$START_STAGE" --stop-after 9 \
   --classical-jobs 8 --classical-threads 1 \
-  --workers 8 --cnn-batch 256 --data-parallel \
-  > "$RUN/pipeline_from4_resume.log" 2>&1 < /dev/null &
-echo $! > "$RUN/pipeline_from4_resume.pid"
+  --workers 8 --embedding-batch 16 --cnn-batch 256 --data-parallel \
+  > "$RUN/pipeline_continue.log" 2>&1 < /dev/null &
+echo $! > "$RUN/pipeline_continue.pid"
 ```
 
-Keep the same inputs, seed, model grids, software environment, selection code and threads-per-job. Resume verifies these against `classical/search_config.json` and refuses incompatible changes. The number of concurrent jobs may change. If a custom cache directory was used, pass it again to retain preprocessing-cache reuse. Do not modify the CV files during a search.
+Restore the same experiment settings, including seed, batch sizes and class metadata. Completed prerequisite outputs must be intact. Before restarting, confirm the previous process and its child processes have exited.
 
-A completed `selection.json` is verified and left unchanged. This option does **not** resume a partially trained CNN or skip later completed stages. If stage 4 is already complete and a later stage failed, choose the appropriate `--start-at` value and satisfy that stage's output-directory requirements.
+| State of the stage being restarted | Action |
+|---|---|
+| Not yet started | Run it with its required prerequisite outputs in place. |
+| Interrupted classical selection with compatible checkpoints | Add `--resume-classical` when the requested range includes stage 4. Completed candidates are reused; an interrupted candidate runs again. |
+| Interrupted stage without supported checkpoints | Preserve its partial output and restart that stage according to its output-directory requirements. Keep completed prerequisite stages. |
+| Already completed | Start at the next required stage to avoid repeating it. |
 
-### Existing output without checkpoints
+`--start-at` skips earlier stages; it does not automatically resume work inside a stage. Candidate-level resume is supported only for classical selection. It verifies inputs, code, software environment, seed, grids and threads-per-job; the number of concurrent jobs may change. Searches without compatible checkpoint provenance cannot be imported automatically. The flag does not resume CNN training or skip later completed stages.
 
-An interrupted classical search created by an implementation without `search_config.json` and candidate checkpoints cannot be imported automatically. Stop that job and confirm its child processes have exited before replacing scripts or moving its output. Archive only the partial classical output, retaining completed preprocessing, features and CV data:
+Monitor the continuation with:
 
 ```bash
-if [ -d "$RUN/classical" ]; then
-  mv -- "$RUN/classical" "$RUN/classical_before_parallel_$(date -u +%Y%m%dT%H%M%SZ)"
-fi
+tail -f "$RUN/pipeline_continue.log"
 ```
 
-Then start a fresh stage-4 search. The archived models remain available, but this new search recomputes them. Do not archive a compatible checkpointed search that you intend to resume.
+Both model-selection stages must be complete before final evaluation. The runner checks for their selection files before executing stages 6 and 7.
 
 ## Running the pipeline
 
@@ -395,8 +370,8 @@ python scripts/7_representation_analysis.py \
 This analysis uses **original, unaugmented nuclei**, matched by identity across the two feature families. It generates:
 
 - **PCA and UMAP panels:** class- and animal-labelled representation plots, PCA component pairs, scree plots, coordinates and loadings.
-- **Corrrelation PCA-3DINO and features:** correlations between the first 31 principal components of standardized 3DINO embeddings and the 31 handcrafted features. PC labels include their explained variance.
-- **Corrrelation 3DINO and features:** correlations between the 31 highest-variance individual 3DINO embedding dimensions and the same handcrafted features. Dimensions are ranked by variance before standardization.
+- **PCA-3DINO vs features:** correlations between the first 31 principal components of standardized 3DINO embeddings and the 31 handcrafted features. PC labels include their explained variance.
+- **3DINO vs features:** correlations between the 31 highest-variance individual 3DINO embedding dimensions and the same handcrafted features. Dimensions are ranked by variance before standardization.
 - **Supplementary outputs:** Spearman heatmaps and correlation tables stratified by animal and class.
 
 These analyses describe representation structure and do not feed into model selection. Constant-feature correlations are displayed as undefined rather than assigned a numerical association.
