@@ -117,7 +117,7 @@ The commands below use the project server layout. Change the paths for your own 
 conda activate nuclei_classification
 export PYTHONNOUSERSITE=1
 
-PROJECT=/.../projects/Nuclei3DClassification
+PROJECT=/medicina/hmorales/projects/Nuclei3DClassification
 DATA="$PROJECT/data"
 RUN="$PROJECT/results"
 DINO_REPO="$PROJECT/code/3DINO"

@@ -1,0 +1,34 @@
+# Python 3.12, Linux x86_64, glibc >=2.28; NVIDIA CUDA 12.4 wheel stack.
+# Install in the nuclei_classification environment using python -m pip.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+# Explicit CUDA 12.4 wheel avoids selecting another CUDA build from PyPI.
+xformers @ https://download.pytorch.org/whl/cu124/xformers-0.0.29.post3-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=08fa92f3e06372c4ce2a5306c54ae3d4a3a399fc7e24e02aac3761112ec3aeed
+
+# Scientific pipeline
+numpy==2.3.5
+scipy==1.17.0
+pandas==2.2.3
+scikit-learn==1.8.0
+scikit-image==0.26.0
+tifffile==2026.8.23
+matplotlib==3.10.8
+joblib==1.5.3
+umap-learn==0.5.12
+openpyxl==3.1.5
+pytest==9.0.2
+
+# 3DINO imports and associated image utilities
+omegaconf==2.3.0
+torchmetrics==0.10.3
+# torchmetrics 0.10.3 imports pkg_resources (removed in setuptools 81).
+setuptools==80.9.0
+fvcore==0.1.5.post20221221
+iopath==0.1.10
+submitit==1.5.3
+monai==1.5.1
+nibabel==5.3.2
+torchio==0.20.23
+einops==0.8.1
+# cuML is not imported by this pipeline or the 3DINO model-loading path.
