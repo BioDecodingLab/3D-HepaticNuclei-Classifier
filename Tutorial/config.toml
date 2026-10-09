@@ -1,0 +1,77 @@
+# 3D hepatic nuclear morphotype classification tutorial
+# Paths may be absolute or relative to this config file.
+
+[run]
+# true: train a new downstream classifier; false: load an existing model.
+train_model = true
+output_dir = "./tutorial_results"
+model_path = ""                 # Required only when train_model = false.
+seed = 42
+device = "cuda"
+batch_size = 16
+workers = 4
+overwrite_output = false
+save_embeddings = true
+
+[data]
+# Labeled training data are required when train_model = true.
+training_dir = "./example_data/train"
+# Optional independent labeled test set. Set to "" to skip test evaluation.
+test_dir = "./example_data/test"
+# Optional unlabeled data for prediction. Requires image/ and labels/, but no class/.
+prediction_dir = "./example_data/predict"
+
+# Subfolder names inside each dataset directory.
+image_subdir = "image"
+instance_subdir = "labels"
+class_subdir = "class"
+
+# For 4D TIFFs, use "auto" or an integer channel axis (for example 0 for CZYX,
+# -1 for ZYXC). Three-dimensional TIFFs are treated as one-channel data.
+channel_axis = "auto"
+
+# Match the paper preprocessing/QC defaults.
+min_voxels = 2500
+border_margin = 3
+normalization_pmin = 30.0
+normalization_pmax = 99.999
+initial_size = [70, 70, 70]
+target_size = [112, 112, 112]
+
+[training]
+# Classical downstream classifier: "logreg", "rf", "svm", or "mlp".
+classifier = "svm"
+
+# 0 = original training nuclei only. Positive values are the total sampled
+# augmented patches per class per training image, matching the paper's semantics.
+# Paper levels were 100, 200, 500, 1000, 2000, and 4000.
+augmentation_level = 4000
+
+# A validation subset is drawn from the training directory only. The independent
+# test directory is never used for model selection.
+validation_fraction = 0.10
+stratify_validation_by_image_and_class = true
+
+# Search the same classifier-specific parameter grid used in the paper.
+hyperparameter_search = true
+
+[dino]
+repo = "../3DINO"
+config = "../3DINO/dinov2/configs/train/vit3d_highres"
+weights = "./3dino_vit_weights.pth"
+
+# "auto" is recommended.
+#   auto               -> direct input when the backbone supports the stream count;
+#                         otherwise per-channel concatenation for a one-channel backbone.
+#   direct             -> feed all prepared channels in one tensor; requires a checkpoint
+#                         whose patch embedding expects exactly that channel count.
+#   per_channel_concat -> run each channel independently through a one-channel frozen
+#                         3DINO backbone and concatenate the resulting embeddings.
+channel_strategy = "auto"
+
+[class_names]
+"1" = "Hepatocyte"
+"2" = "Stellate cell"
+"3" = "Kupffer cell"
+"4" = "Endothelial cell"
+"5" = "Other cell"
