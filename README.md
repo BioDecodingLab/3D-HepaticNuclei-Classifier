@@ -15,6 +15,7 @@ The workflow includes nuclear patch extraction, training augmentation, feature e
 - [Experimental design](#experimental-design)
 - [Installation](#installation)
 - [Input data and paths](#input-data-and-paths)
+- [Application tutorial](#application-tutorial)
 - [Running the pipeline](#running-the-pipeline)
 - [Run the complete workflow](#run-the-complete-workflow)
 - [Continue from stage X](#continue-from-stage-x)
@@ -144,6 +145,18 @@ python scripts/check_environment.py --device cuda \
 ```
 
 This verifies that your checkpoint can produce finite 1,024-dimensional outputs on your GPU. It does not train a model or use biological data.
+
+## Application tutorial
+
+For users who want to **train a frozen-3DINO classifier on their own training images or apply an existing trained classifier to new segmented volumes**, a configuration-driven application tutorial is provided in **[Tutorial/README.md](Tutorial/README.md)**.
+
+The tutorial is intentionally separate from the manuscript reproduction workflow. Instead of leave-one-animal-out cross-validation, it uses explicit training and independent test directories, with an optional prediction directory for new images. A single `config.toml` controls the input paths, downstream classifier (`logreg`, `rf`, `svm`, or `mlp`), augmentation level, 3DINO source/configuration/weights, output paths, and whether to train a new classifier or load an existing one. The complete tutorial is executed with:
+
+```bash
+python Tutorial/run_tutorial.py --config Tutorial/config.toml
+```
+
+The paper itself evaluates one-channel DAPI input. The tutorial additionally supports one-, two-, and three-channel volumetric TIFF input for reuse on other datasets. Two-channel input is expanded internally to three streams (channel 1, channel 2, and their normalized sum). Because the official pretrained 3DINO-ViT backbone is a one-channel volumetric model, the tutorial verifies input compatibility and, when necessary, processes multiple streams independently through the unchanged frozen backbone and concatenates their embeddings. See the tutorial README for the exact input structure, channel-handling rules, model-provenance checks, and output files.
 
 ## Run the complete workflow
 
@@ -468,6 +481,7 @@ The smoke workflow uses reduced synthetic data and training budgets. Its represe
 | `scripts/6_statistical_analysis.py` | Model comparisons, statistical tables and evaluation panels |
 | `scripts/7_representation_analysis.py` | PCA, UMAP and feature-correlation analysis |
 | `tests/` | Scientific contract tests and synthetic workflow |
+| `Tutorial/` | Configuration-driven training, independent testing and prediction tutorial for the frozen-3DINO approach |
 | `docs/` | Detailed feature definitions and verification information |
 | `requirements.txt` | Python dependencies |
 | `run_pipeline.sh` | Ordered workflow stages, classical parallelism controls and per-stage logs |
